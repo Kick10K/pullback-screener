@@ -45,20 +45,34 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
     liquidity_ok = avg_val20 >= krs.CONFIG["MIN_AVG_TRADING_VALUE_EOK"]
     band_ok = (not pd.isna(row["retrace_ratio"])) and (krs.CONFIG["RETRACE_MIN"] <= row["retrace_ratio"] <= krs.CONFIG["RETRACE_MAX"])
     is_uptrend = bool(row["is_uptrend"])
-    is_candidate = bool(is_uptrend and liquidity_ok and band_ok)
 
-    sc = krs.score_row(feat, j) if is_uptrend and not pd.isna(row["retrace_ratio"]) else None
+    # INV-4: 고점 경과일 조건. screen_on_date()와 같은 기준을 써야 CSV와 대시보드 판정이 갈라지지 않는다.
+    dsh = row["days_since_high20"]
+    dsh_int = None if pd.isna(dsh) else int(dsh)
+    days_ok = dsh_int is not None and (
+        krs.CONFIG["DAYS_SINCE_HIGH_MIN"] <= dsh_int <= krs.CONFIG["DAYS_SINCE_HIGH_MAX"]
+    )
+    is_candidate = bool(is_uptrend and liquidity_ok and band_ok and days_ok)
+
+    reasons = []
+    if not is_uptrend:
+        reasons.append("정배열 아님")
+    if not liquidity_ok:
+        reasons.append(f"거래대금 부족 ({avg_val20:.0f}억)")
+    if not days_ok:
+        reasons.append(f"고점경과일 {dsh_int}일 (허용 {krs.CONFIG['DAYS_SINCE_HIGH_MIN']}~{krs.CONFIG['DAYS_SINCE_HIGH_MAX']}일)")
+    if not band_ok:
+        reasons.append("되돌림비율 범위 밖")
+
+    # 경과일 필터에 걸린 종목은 점수 계산에 도달하지 않는다(§4).
+    sc = krs.score_row(feat, j) if (is_uptrend and days_ok and not pd.isna(row["retrace_ratio"])) else None
 
     def nn(v):
         return None if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) else v
 
     h20, l20 = row["h20"], row["l20"]
     depth_pct = (h20 - l20) / h20 * 100 if not pd.isna(h20) and h20 > 0 and not pd.isna(l20) else np.nan
-    peak_date = None
-    if not pd.isna(row["days_since_high20"]):
-        peak_i = j - int(row["days_since_high20"])
-        if 0 <= peak_i < len(feat):
-            peak_date = feat.index[peak_i].strftime("%Y-%m-%d")
+    peak_date = krs.peak_date_of(feat, j)
 
     return dict(
         code=meta["code"], name=meta["name"], market=meta["market"],
@@ -66,6 +80,8 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
         close=nn(float(row["close"])), mcap_eok=nn(float(meta.get("mcap_eok", np.nan))),
         is_uptrend=is_uptrend,
         is_candidate=is_candidate,
+        passes_days_since_high=bool(days_ok),
+        exclude_reason="; ".join(reasons) if reasons else "",
         retrace_ratio=nn(round(float(row["retrace_ratio"]), 3)) if not pd.isna(row["retrace_ratio"]) else None,
         disparity_vs_ma20=nn(round(float(row["disparity"]), 3)) if not pd.isna(row["disparity"]) else None,
         ma5=nn(round(float(row["ma5"]), 2)) if not pd.isna(row["ma5"]) else None,
@@ -114,7 +130,7 @@ def main():
     print("[2/3] 상태 플래그 + 3년치 캐시 갱신...")
     metas: dict[str, dict] = {}
     histories: dict[str, pd.DataFrame] = {}
-    status_excluded, failed = [], []
+    status_excluded, failed, discontinuity_excluded = [], [], []
     for i, (_, urow) in enumerate(universe.iterrows(), 1):
         code = urow["code"]
         flags = krs.fetch_status_flags(code)
@@ -126,6 +142,10 @@ def main():
             if len(hist) < 130:
                 failed.append(urow["name"])
                 continue
+            gaps = krs.detect_price_discontinuity(hist)      # INV-6 가드
+            if gaps:
+                discontinuity_excluded.append((urow["name"], code, gaps[:3]))
+                continue
             histories[code] = krs.compute_features(hist)
             metas[code] = urow.to_dict()
         except Exception:
@@ -133,7 +153,10 @@ def main():
         if i % 30 == 0:
             print(f"      {i}/{len(universe)}...")
         time.sleep(0.05)
-    print(f"      상태플래그 제외 {len(status_excluded)}, 데이터실패 {len(failed)}, 분석대상 {len(histories)}")
+    print(f"      상태플래그 제외 {len(status_excluded)}, 데이터실패 {len(failed)}, "
+          f"가격불연속 제외 {len(discontinuity_excluded)}, 분석대상 {len(histories)}")
+    if discontinuity_excluded:
+        print(f"      가격불연속(미조정 분할 의심): {discontinuity_excluded[:5]}")
 
     last_dates = pd.Series([h.index.max() for h in histories.values()])
     run_date = last_dates.mode().iloc[0]

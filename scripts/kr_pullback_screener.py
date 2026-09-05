@@ -21,10 +21,17 @@ which are what most Korean retail-quant tooling has fallen back to for
 the same reason. Two consequences worth knowing:
   - Daily 거래대금 is not published directly by this source; it is
     approximated as close * volume (the standard proxy).
-  - Prices are NOT split-adjusted. A stock that split during the lookback
-    window will show a fake price discontinuity. This is mitigated by the
-    market-cap floor (large caps split far less often than small caps)
-    but not eliminated -- see the caveat in the HTML report.
+  - PRICE BASIS (verified 2026-09-06, INV-6): the series IS adjusted for
+    splits and bonus issues, and is NOT adjusted for dividends. Evidence:
+    (a) across 141 universe stocks x 3 years there is not one close-to-close
+        move outside the KRX ±30% price limit -- an unadjusted split would
+        necessarily produce one (ratio 0.5 / 0.2 / 0.1);
+    (b) the series lines up with Yahoo's split-adjusted raw closes
+        (median naver/yahoo_raw = 1.0000 on 005930 / 051910 / 035420) and
+        sits 1-3% above Yahoo's adjclose, which is the dividend leg.
+    An earlier version of this docstring claimed the opposite without
+    checking. detect_price_discontinuity() now enforces this as a guard
+    rather than a comment.
 """
 
 from __future__ import annotations
@@ -72,6 +79,22 @@ CONFIG = dict(
     RETRACE_MAX = 0.70,             # 통과 상한. 이 값 초과면 추세 훼손 수준의 눌림 -> 제외.
                                      # 비율 자체는 필터로 잘라도 결과 테이블 컬럼에는 항상 남긴다.
 
+    # --- 되돌림 구간 형성 조건 (INV-4) ---
+    DAYS_SINCE_HIGH_MIN = 2,        # 고점 이후 최소 경과 거래일. 1이면 '고점 다음날 음봉 하나'일 뿐 되돌림 구간이
+                                     # 아직 없다. 내리면(=1 허용) 상승 진행 중인 종목이 후보로 섞이고, 눌림 구간이
+                                     # 1일뿐이라 vol_dryup_ratio가 통계적으로 무의미해진다. 2 미만으로 두지 말 것.
+    DAYS_SINCE_HIGH_MAX = 15,       # 고점 이후 최대 경과 거래일. 넘으면 눌림이 아니라 추세 이탈/횡보로 본다.
+                                     # 올리면 낡은 고점을 기준으로 한 종목이 늘고, 내리면 후보 수가 빠르게 준다.
+    FRESHNESS_IDEAL_MIN = 3,        # freshness 점수 만점 구간 시작(거래일).
+    FRESHNESS_IDEAL_MAX = 8,        # freshness 점수 만점 구간 끝. 넓히면 경과일 변별력이 사라지고,
+                                     # 좁히면 특정 일수에만 점수가 쏠린다.
+
+    # --- 데이터 무결성 가드 (INV-6) ---
+    PRICE_GAP_MAX_RATIO = 1.35,     # 전일 종가 대비 당일 종가 배율 상한.
+    PRICE_GAP_MIN_RATIO = 0.65,     # 하한. KRX 가격제한폭이 ±30%라 이 밖의 종가 점프는 실제 거래로 설명되지 않고
+                                     # 미조정 액면분할/무상증자를 의심해야 한다. 해당 종목은 제외하고 로그로 남긴다.
+                                     # 넓히면(1.5/0.5) 실제 분할을 놓치고, 좁히면 상·하한가(±30%)가 오탐된다.
+
     # --- history / cache ---
     HISTORY_YEARS = 3,              # 최초 캐시 적재 시 받아올 연수.
     SPARKLINE_DAYS = 60,            # HTML 리포트 스파크라인에 쓸 최근 거래일 수.
@@ -98,6 +121,11 @@ def http_get_text(url: str, encoding: str, timeout: int = 20) -> str:
 
 
 # ============================ universe building =============================
+
+def is_excluded_name(name: str) -> bool:
+    """종목명만으로 우선주/스팩/리츠를 걸러낸다 (§3-1). 판별 규칙은 CONFIG에만 둔다."""
+    return bool(CONFIG["EXCLUDE_NAME_RE"].search(str(name)))
+
 
 def fetch_kind_listing(market_type: str) -> pd.DataFrame:
     """market_type: 'stockMkt' (KOSPI) or 'kosdaqMkt' (KOSDAQ)."""
@@ -150,7 +178,7 @@ def build_universe() -> tuple[pd.DataFrame, dict]:
     cap_df = pd.concat([kospi_cap, kosdaq_cap], ignore_index=True)
     report["mcap_floor_pass"] = len(cap_df)
 
-    name_excluded = cap_df[cap_df["name"].apply(lambda n: bool(CONFIG["EXCLUDE_NAME_RE"].search(n)))]
+    name_excluded = cap_df[cap_df["name"].apply(is_excluded_name)]
     cap_df = cap_df[~cap_df["code"].isin(name_excluded["code"])].reset_index(drop=True)
     report["excluded_by_name_pattern"] = name_excluded["name"].tolist()
 
@@ -249,6 +277,44 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     return x
 
 
+def detect_price_discontinuity(df: pd.DataFrame) -> list[tuple[str, float]]:
+    """미조정 액면분할/무상증자 의심 지점 탐지 (INV-6 가드).
+
+    KRX 일간 가격제한폭이 ±30%이므로, 종가 대비 종가 비율이 그 밖으로 벗어나면
+    실제 거래로는 설명되지 않는다. 남는 설명은 주식 수 변경이 가격에 반영되지
+    않은 경우이고, 그 상태로 두면 H·L·이동평균이 오염되어 가짜 되돌림이 만들어진다.
+    """
+    if len(df) < 2:
+        return []
+    ratio = df["close"] / df["close"].shift(1)
+    bad = ratio[(ratio > CONFIG["PRICE_GAP_MAX_RATIO"]) | (ratio < CONFIG["PRICE_GAP_MIN_RATIO"])]
+    return [(d.strftime("%Y-%m-%d"), round(float(v), 4)) for d, v in bad.items() if not pd.isna(v)]
+
+
+def freshness_score(days: float) -> float:
+    """고점 이후 경과일 점수. 이상 구간에서 만점, 벗어날수록 감점.
+
+    '짧을수록 좋다'로 두면 고점 바로 다음날이 만점을 받아, 되돌림이 시작도 안 된
+    종목이 점수 상위를 차지한다(§4). 그래서 고원(plateau)형으로 만든다.
+    """
+    lo, hi = CONFIG["FRESHNESS_IDEAL_MIN"], CONFIG["FRESHNESS_IDEAL_MAX"]
+    if lo <= days <= hi:
+        return 1.0
+    if days < lo:
+        return float(np.clip(1.0 - (lo - days) / lo, 0.0, 1.0))
+    span = max(CONFIG["DAYS_SINCE_HIGH_MAX"] - hi, 1)
+    return float(np.clip(1.0 - (days - hi) / span, 0.0, 1.0))
+
+
+def peak_date_of(x: pd.DataFrame, j: int) -> str | None:
+    """기준일 j의 20일 고점이 형성된 날짜. 점수 산출과 무관하게 항상 필요하다."""
+    d = x["days_since_high20"].iloc[j]
+    if pd.isna(d):
+        return None
+    peak_i = j - int(d)
+    return x.index[peak_i].strftime("%Y-%m-%d") if 0 <= peak_i < len(x) else None
+
+
 def score_row(x: pd.DataFrame, j: int) -> dict:
     """Score components for row j; each raw metric plus a 0..1 normalized
     version relative to the trailing 120 sessions of this same stock (so the
@@ -282,7 +348,7 @@ def score_row(x: pd.DataFrame, j: int) -> dict:
     ma_distance_n = 0.5 if pd.isna(ma_distance) else float(np.clip(1 - ma_distance / 0.15, 0, 1))
 
     freshness = x["days_since_high20"].iloc[j]
-    freshness_n = 0.5 if pd.isna(freshness) else float(np.clip(1 - (freshness - 1) / (CONFIG["RETRACE_WINDOW"] - 1), 0, 1))
+    freshness_n = 0.5 if pd.isna(freshness) else freshness_score(float(freshness))
 
     score = (
         CONFIG["WEIGHT_VALUE_GROWTH"] * value_growth_n
@@ -308,17 +374,43 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
     avg_val20 = feat["trading_value_eok"].iloc[max(0, j - 19):j + 1].mean()
     if avg_val20 < CONFIG["MIN_AVG_TRADING_VALUE_EOK"]:
         return None
-    passes = CONFIG["RETRACE_MIN"] <= row["retrace_ratio"] <= CONFIG["RETRACE_MAX"]
-    sc = score_row(feat, j)
+    passes_band = CONFIG["RETRACE_MIN"] <= row["retrace_ratio"] <= CONFIG["RETRACE_MAX"]
+
+    # INV-4: 고점 경과일이 범위 밖이면 후보에서 탈락시킨다. 행 자체는 남겨서
+    # retrace_ratio(INV-3)와 탈락 사유를 계속 볼 수 있게 한다.
+    dsh = row["days_since_high20"]
+    dsh_int = None if pd.isna(dsh) else int(dsh)
+    passes_days = dsh_int is not None and (
+        CONFIG["DAYS_SINCE_HIGH_MIN"] <= dsh_int <= CONFIG["DAYS_SINCE_HIGH_MAX"]
+    )
+
+    reasons = []
+    if not passes_days:
+        reasons.append(
+            f"고점경과일 {dsh_int}일 (허용 {CONFIG['DAYS_SINCE_HIGH_MIN']}~{CONFIG['DAYS_SINCE_HIGH_MAX']}일)"
+        )
+    if not passes_band:
+        reasons.append(
+            f"되돌림비율 {row['retrace_ratio']:.3f} (허용 {CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']})"
+        )
+
+    # 경과일 필터에 걸린 종목은 점수 계산에 도달하지 않는다(§4).
+    sc = score_row(feat, j) if passes_days else dict(
+        score=None, value_growth_pct=None, vol_dryup_ratio=None, peak_date=peak_date_of(feat, j)
+    )
+
     return dict(
         code=meta["code"], name=meta["name"], market=meta["market"],
         date=date.strftime("%Y-%m-%d"),
         close=float(row["close"]), mcap_eok=meta.get("mcap_eok"),
         retrace_ratio=round(float(row["retrace_ratio"]), 3),
-        passes_retrace_band=bool(passes),
+        passes_retrace_band=bool(passes_band),
+        passes_days_since_high=bool(passes_days),
+        is_candidate=bool(passes_band and passes_days),
+        exclude_reason="; ".join(reasons) if reasons else "",
         ma5=float(row["ma5"]), ma20=float(row["ma20"]), ma60=float(row["ma60"]), ma120=float(row["ma120"]),
         disparity_vs_ma20=round(float(row["disparity"]), 3),
-        days_since_high20=None if pd.isna(row["days_since_high20"]) else int(row["days_since_high20"]),
+        days_since_high20=dsh_int,
         avg_trading_value20_eok=round(float(avg_val20), 1),
         **sc,
     )
@@ -347,7 +439,7 @@ def build_html_report(results: list[dict], histories: dict, run_date: str, funne
         hist = histories[r["code"]]
         spark_series = hist["close"].tail(CONFIG["SPARKLINE_DAYS"])
         up = spark_series.iloc[-1] >= spark_series.iloc[0]
-        band = "band-ok" if r["passes_retrace_band"] else "band-out"
+        band = "band-ok" if r["is_candidate"] else "band-out"
         rows_html.append(f"""
         <tr>
           <td class="l">{r['name']}<br><span class="dim">{r['code']} · {r['market']}</span></td>
@@ -361,7 +453,7 @@ def build_html_report(results: list[dict], histories: dict, run_date: str, funne
           <td class="r score">{r['score']:.1f}</td>
           <td>{sparkline_svg(spark_series, up)}</td>
         </tr>""")
-    pass_band = sum(1 for r in results if r["passes_retrace_band"])
+    pass_band = sum(1 for r in results if r["is_candidate"])
     return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <title>KR 되돌림 스크리너 {run_date}</title>
 <style>
@@ -396,7 +488,7 @@ td.l {{ text-align:left; }} .dim {{ color:#9096a6; font-size:11px; }}
 </tbody></table>
 <div class="note">
 데이터 출처: KRX 정보데이터시스템(data.krx.co.kr)이 무인증 통계 API를 로그인 필수로 전환해 pykrx가 더 이상 동작하지 않고, 이 샌드박스에서는 FinanceDataReader 설치도 되지 않아(PyPI 인덱스에 해당 배포본 없음) 두 방법 모두 실패했습니다. 대신 네이버 금융의 공개 엔드포인트로 대체했습니다.
-20일 평균 거래대금은 (종가×거래량) 근사치이며 실제 체결 거래대금과는 소폭 차이가 있을 수 있습니다. 가격은 수정주가가 아니므로 조회 기간 중 액면분할·무상증자가 있었던 종목은 그 시점에 가격이 부자연스럽게 끊겨 보일 수 있습니다(시총 하한 덕분에 대상은 대형주 위주라 발생 빈도는 낮습니다). 이 화면은 투자 판단을 보조하는 참고 자료입니다.
+20일 평균 거래대금은 (종가×거래량) 근사치이며 실제 체결 거래대금과는 소폭 차이가 있을 수 있습니다. 가격은 액면분할·무상증자가 반영된 수정주가이며(배당은 미반영), 매 실행마다 ±30% 가격제한폭을 벗어나는 종가 불연속이 있는지 검사해 해당 종목은 제외합니다. 이 화면은 투자 판단을 보조하는 참고 자료입니다.
 </div>
 </body></html>"""
 
@@ -474,12 +566,17 @@ def main():
     histories: dict[str, pd.DataFrame] = {}
     metas: dict[str, dict] = {}
     failed_fetch = []
+    discontinuity_excluded = []
     for i, (_, row) in enumerate(universe.iterrows(), 1):
         code = row["code"]
         try:
             hist = update_cache(code)
             if len(hist) < 130:
                 failed_fetch.append((row["name"], "history too short"))
+                continue
+            gaps = detect_price_discontinuity(hist)          # INV-6 가드
+            if gaps:
+                discontinuity_excluded.append((row["name"], code, gaps[:3]))
                 continue
             histories[code] = compute_features(hist)
             metas[code] = row.to_dict()
@@ -489,6 +586,7 @@ def main():
             print(f"      {i}/{len(universe)} 완료...")
         time.sleep(0.05)
     print(f"      데이터 확보 실패: {len(failed_fetch)}종목 -> {failed_fetch[:10]}")
+    print(f"      가격 불연속(미조정 분할 의심) 제외: {len(discontinuity_excluded)}종목 -> {discontinuity_excluded[:5]}")
     print(f"      최종 분석 대상: {len(histories)}종목")
 
     # pick the run date = most common last index among all histories
@@ -504,12 +602,19 @@ def main():
         r = screen_on_date(feat, run_date, metas[code])
         if r:
             all_candidates.append(r)
-    final = [r for r in all_candidates if r["passes_retrace_band"]]
-    print(f"      정배열+눌림 감지: {len(all_candidates)}종목 / 되돌림비율 {CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']} 통과: {len(final)}종목")
+    final = [r for r in all_candidates if r["is_candidate"]]
+    n_band = sum(1 for r in all_candidates if r["passes_retrace_band"])
+    n_days_out = sum(1 for r in all_candidates if not r["passes_days_since_high"])
+    print(f"      정배열+눌림 감지: {len(all_candidates)}종목")
+    print(f"      되돌림비율 {CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']} 통과: {n_band}종목")
+    print(f"      고점경과일 {CONFIG['DAYS_SINCE_HIGH_MIN']}~{CONFIG['DAYS_SINCE_HIGH_MAX']}일 밖으로 탈락: {n_days_out}종목")
+    print(f"      최종 후보: {len(final)}종목")
 
     date_str = run_date.strftime("%Y%m%d")
     csv_path = OUT_DIR / f"kr_pullback_{date_str}.csv"
-    pd.DataFrame(sorted(final, key=lambda d: -d["score"])).to_csv(csv_path, index=False, encoding="utf-8-sig")
+    # CSV에는 탈락 종목도 남긴다 (INV-3: 밴드 밖이어도 retrace_ratio는 항상 보존).
+    csv_rows = sorted(all_candidates, key=lambda d: (not d["is_candidate"], -(d["score"] or 0)))
+    pd.DataFrame(csv_rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     html_path = OUT_DIR / f"kr_pullback_{date_str}.html"
     html_path.write_text(build_html_report(final, histories, run_date.strftime("%Y-%m-%d"), funnel, len(all_candidates)), encoding="utf-8")
@@ -525,7 +630,7 @@ def main():
             if d not in feat.index:
                 continue
             r = screen_on_date(feat, d, metas[code])
-            if r and r["passes_retrace_band"]:
+            if r and r["is_candidate"]:
                 n_pass += 1
         dist.append((d.strftime("%Y-%m-%d"), n_pass))
     counts = [c for _, c in dist]
