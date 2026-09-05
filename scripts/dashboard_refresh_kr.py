@@ -52,6 +52,14 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
     def nn(v):
         return None if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) else v
 
+    h20, l20 = row["h20"], row["l20"]
+    depth_pct = (h20 - l20) / h20 * 100 if not pd.isna(h20) and h20 > 0 and not pd.isna(l20) else np.nan
+    peak_date = None
+    if not pd.isna(row["days_since_high20"]):
+        peak_i = j - int(row["days_since_high20"])
+        if 0 <= peak_i < len(feat):
+            peak_date = feat.index[peak_i].strftime("%Y-%m-%d")
+
     return dict(
         code=meta["code"], name=meta["name"], market=meta["market"],
         date=date.strftime("%Y-%m-%d"),
@@ -64,12 +72,15 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
         ma20=nn(round(float(row["ma20"]), 2)) if not pd.isna(row["ma20"]) else None,
         ma60=nn(round(float(row["ma60"]), 2)) if not pd.isna(row["ma60"]) else None,
         ma120=nn(round(float(row["ma120"]), 2)) if not pd.isna(row["ma120"]) else None,
+        h20=nn(round(float(h20), 2)) if not pd.isna(h20) else None,
+        l20=nn(round(float(l20), 2)) if not pd.isna(l20) else None,
+        depth_pct=nn(round(float(depth_pct), 2)) if not pd.isna(depth_pct) else None,
         days_since_high20=None if pd.isna(row["days_since_high20"]) else int(row["days_since_high20"]),
         avg_trading_value20_eok=nn(round(float(avg_val20), 1)) if not pd.isna(avg_val20) else None,
         score=sc["score"] if sc else None,
         value_growth_pct=sc["value_growth_pct"] if sc else None,
         vol_dryup_ratio=sc["vol_dryup_ratio"] if sc else None,
-        peak_date=sc["peak_date"] if sc else None,
+        peak_date=peak_date,
     )
 
 
