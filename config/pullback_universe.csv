@@ -1,0 +1,81 @@
+symbol,market,name,sector
+AAPL,US,Apple,Technology
+MSFT,US,Microsoft,Technology
+AMZN,US,Amazon,Consumer
+GOOGL,US,Alphabet A,Communication
+NVDA,US,NVIDIA,Technology
+META,US,Meta Platforms,Communication
+AVGO,US,Broadcom,Technology
+TSLA,US,Tesla,Consumer
+JPM,US,JPMorgan Chase,Financials
+V,US,Visa,Financials
+WMT,US,Walmart,Consumer Staples
+LLY,US,Eli Lilly,Health Care
+ORCL,US,Oracle,Technology
+MA,US,Mastercard,Financials
+XOM,US,Exxon Mobil,Energy
+NFLX,US,Netflix,Communication
+COST,US,Costco,Consumer Staples
+HD,US,Home Depot,Consumer
+PG,US,Procter & Gamble,Consumer Staples
+JNJ,US,Johnson & Johnson,Health Care
+ABBV,US,AbbVie,Health Care
+BAC,US,Bank of America,Financials
+KO,US,Coca-Cola,Consumer Staples
+CRM,US,Salesforce,Technology
+AMD,US,Advanced Micro Devices,Technology
+CVX,US,Chevron,Energy
+CSCO,US,Cisco Systems,Technology
+MRK,US,Merck,Health Care
+PEP,US,PepsiCo,Consumer Staples
+ADBE,US,Adobe,Technology
+TMO,US,Thermo Fisher,Health Care
+WFC,US,Wells Fargo,Financials
+MCD,US,McDonald's,Consumer
+DIS,US,Walt Disney,Communication
+ABT,US,Abbott Laboratories,Health Care
+QCOM,US,Qualcomm,Technology
+IBM,US,IBM,Technology
+CAT,US,Caterpillar,Industrials
+GE,US,GE Aerospace,Industrials
+TXN,US,Texas Instruments,Technology
+005930.KS,KR,Samsung Electronics,Technology
+000660.KS,KR,SK Hynix,Technology
+207940.KS,KR,Samsung Biologics,Health Care
+005380.KS,KR,Hyundai Motor,Consumer
+000270.KS,KR,Kia,Consumer
+068270.KS,KR,Celltrion,Health Care
+105560.KS,KR,KB Financial,Financials
+055550.KS,KR,Shinhan Financial,Financials
+005490.KS,KR,POSCO Holdings,Materials
+035420.KS,KR,NAVER,Communication
+035720.KS,KR,Kakao,Communication
+051910.KS,KR,LG Chem,Materials
+006400.KS,KR,Samsung SDI,Industrials
+012330.KS,KR,Hyundai Mobis,Consumer
+012450.KS,KR,Hanwha Aerospace,Industrials
+034020.KS,KR,Doosan Enerbility,Industrials
+028260.KS,KR,Samsung C&T,Industrials
+033780.KS,KR,KT&G,Consumer Staples
+011200.KS,KR,HMM,Industrials
+017670.KS,KR,SK Telecom,Communication
+086280.KS,KR,Hyundai Glovis,Industrials
+009150.KS,KR,Samsung Electro-Mechanics,Technology
+015760.KS,KR,Korea Electric Power,Utilities
+086790.KS,KR,Hana Financial,Financials
+000810.KS,KR,Samsung Fire & Marine,Financials
+032830.KS,KR,Samsung Life,Financials
+066570.KS,KR,LG Electronics,Consumer
+003550.KS,KR,LG Corp,Industrials
+034730.KS,KR,SK Inc,Industrials
+003490.KS,KR,Korean Air,Industrials
+011170.KS,KR,Lotte Chemical,Materials
+090430.KS,KR,Amorepacific,Consumer
+042700.KS,KR,Hanmi Semiconductor,Technology
+010130.KS,KR,Korea Zinc,Materials
+030200.KS,KR,KT Corp,Communication
+247540.KQ,KR,Ecopro BM,Industrials
+196170.KQ,KR,Alteogen,Health Care
+028300.KQ,KR,HLB,Health Care
+086520.KQ,KR,Ecopro,Industrials
+035900.KQ,KR,JYP Entertainment,Communication

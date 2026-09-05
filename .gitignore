@@ -1,0 +1,8 @@
+*.pyc
+.env
+__pycache__/
+analysis_output/
+data/kr_cache/
+data/raw_yahoo/
+node_modules/
+outputs/
