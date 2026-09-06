@@ -168,7 +168,41 @@ def fetch_kind_listing(market_type: str) -> pd.DataFrame:
     df.columns = ["name", "market_seg", "code", "industry", "product", "listing_date", "settle_month", "ceo", "homepage", "region"][:len(df.columns)]
     df["code"] = df["code"].astype(str).str.zfill(6)
     df["listing_date"] = pd.to_datetime(df["listing_date"], errors="coerce")
-    return df[["code", "name", "listing_date"]]
+    # 한국전력공사처럼 지역 컬럼만 다른 중복 행이 있다. 그대로 두면 merge에서 행이 불어난다.
+    df = df.drop_duplicates("code")
+    return df[["code", "name", "listing_date", "industry"]]
+
+
+# KIND 업종(KSIC)은 유니버스 139종목에 52종이 나올 만큼 잘게 쪼개져 있어 한눈에 보기 어렵다.
+# 화면 표시용으로만 굵게 접는다. 위에서부터 먼저 걸리는 규칙을 쓰므로 순서가 의미를 가진다.
+# 주의: 이 값은 표시 전용이며 스크리닝 판정에 일절 쓰지 않는다.
+SECTOR_RULES = (
+    (r"반도체|전자부품|통신 및 방송 장비|측정, 시험|컴퓨터 및 주변장치", "반도체·전자"),
+    (r"일차전지|이차전지", "2차전지"),
+    (r"소프트웨어|컴퓨터 프로그래밍|자료처리", "IT·소프트웨어"),
+    (r"오디오물 출판|영화|방송업|광고", "미디어·엔터"),
+    (r"금융업|보험업|금융 지원|은행", "금융·지주"),   # 국내 지주회사는 KSIC상 '기타 금융업'으로 분류된다
+    (r"의약|의료용|자연과학 및 공학 연구개발", "바이오·헬스케어"),
+    (r"화학|고무제품|철강|비철금속|비금속 광물|절연선", "화학·소재"),
+    (r"전동기, 발전기|기타 전기장비", "전력기기"),
+    (r"선박|항공기,우주선|무기 및 총포탄|그외 기타 운송장비", "조선·방산·항공우주"),
+    (r"기계 제조업|기계장비 및 관련 물품 도매", "기계"),
+    (r"자동차", "자동차"),
+    (r"석유 정제품|전기업|가스", "에너지·유틸리티"),
+    (r"건설업|건축기술|공사업", "건설·인프라"),
+    (r"운송업|운송관련", "운송"),
+    (r"전기 통신업", "통신"),
+    (r"식품|담배|도매업|중개업|개인 서비스업|소매", "소비·유통"),
+)
+
+
+def sector_of(industry: str | float) -> str:
+    if not isinstance(industry, str):
+        return "기타"
+    for pattern, name in SECTOR_RULES:
+        if re.search(pattern, industry):
+            return name
+    return "기타"
 
 
 def fetch_mcap_ranked(sosok: int, mcap_floor_eok: float) -> pd.DataFrame:
@@ -179,17 +213,26 @@ def fetch_mcap_ranked(sosok: int, mcap_floor_eok: float) -> pd.DataFrame:
     while True:
         url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
         html = http_get_text(url, "euc-kr")
-        codes = re.findall(r'code=(\d{6})"[^>]*class="tltle"', html)
-        if not codes:
+        # 종목코드는 더 이상 숫자 6자리가 아니다. KRX가 '0167A0' 같은 영숫자 코드를 발급한다.
+        # 숫자만 매칭하면 그런 행을 건너뛰고, 표와 위치로 짝지을 때 그 뒤 전체가 한 칸씩 밀린다.
+        # 이름까지 같은 정규식으로 함께 뽑아 아래에서 위치 짝짓기를 '검증'한다.
+        pairs = re.findall(r'code=([0-9A-Z]{6})"[^>]*class="tltle">([^<]+)</a>', html)
+        if not pairs:
             break
         tables = pd.read_html(io.StringIO(html))
         t = tables[1].dropna(subset=["종목명"]).reset_index(drop=True)
-        if len(t) != len(codes):
-            n = min(len(t), len(codes))
-            t = t.iloc[:n]
-            codes = codes[:n]
+        # 예전에는 min()으로 길이만 맞춰 잘라내서 어긋남이 조용히 통과했다.
+        # 그 결과 13종목이 이웃 종목의 이름·시가총액을 달고 있었다(§8 R-3). 이제는 즉시 실패시킨다.
+        names = [n for _, n in pairs]
+        if len(names) != len(t) or names != t["종목명"].tolist():
+            first = next((i for i in range(min(len(names), len(t))) if names[i] != t["종목명"].iloc[i]), None)
+            raise RuntimeError(
+                f"시총 순위 페이지 파싱 정렬 실패 (sosok={sosok}, page={page}): "
+                f"링크 {len(names)}건 vs 표 {len(t)}행"
+                + (f", 첫 불일치 idx={first} '{names[first]}' != '{t['종목명'].iloc[first]}'" if first is not None else "")
+            )
         t = t.copy()
-        t["code"] = codes
+        t["code"] = [c for c, _ in pairs]
         rows.append(t[["code", "종목명", "시가총액", "상장주식수"]])
         page_min_cap = t["시가총액"].min()
         if page_min_cap < mcap_floor_eok or len(t) < 50:
@@ -217,7 +260,8 @@ def build_universe() -> tuple[pd.DataFrame, dict]:
     kospi_list = fetch_kind_listing("stockMkt")
     kosdaq_list = fetch_kind_listing("kosdaqMkt")
     listing = pd.concat([kospi_list, kosdaq_list], ignore_index=True).drop_duplicates("code")
-    merged = cap_df.merge(listing[["code", "listing_date"]], on="code", how="left")
+    merged = cap_df.merge(listing[["code", "listing_date", "industry"]], on="code", how="left")
+    merged["sector"] = merged["industry"].map(sector_of)
 
     today = pd.Timestamp.now().normalize()
     merged["listing_days"] = (today - merged["listing_date"]).dt.days
@@ -484,6 +528,7 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
 
     return dict(
         code=meta["code"], name=meta["name"], market=meta["market"],
+        sector=meta.get("sector") or "기타",
         date=date.strftime("%Y-%m-%d"),
         close=float(row["close"]), mcap_eok=meta.get("mcap_eok"),
         retrace_ratio=round(float(row["retrace_ratio"]), 3),

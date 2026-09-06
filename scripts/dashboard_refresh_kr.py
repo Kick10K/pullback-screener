@@ -79,6 +79,7 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
 
     return dict(
         code=meta["code"], name=meta["name"], market=meta["market"],
+        sector=meta.get("sector") or "기타", industry=meta.get("industry") or "",
         date=date.strftime("%Y-%m-%d"),
         close=nn(float(row["close"])), mcap_eok=nn(float(meta.get("mcap_eok", np.nan))),
         is_uptrend=is_uptrend,
