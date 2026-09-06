@@ -52,7 +52,9 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
     days_ok = dsh_int is not None and (
         krs.CONFIG["DAYS_SINCE_HIGH_MIN"] <= dsh_int <= krs.CONFIG["DAYS_SINCE_HIGH_MAX"]
     )
-    is_candidate = bool(is_uptrend and liquidity_ok and band_ok and days_ok)
+    # INV-7: 시계열 구조 조건. screen_on_date()와 같은 함수를 호출해 판정이 갈라지지 않게 한다.
+    struct = krs.structure_verdict(row)
+    is_candidate = bool(is_uptrend and liquidity_ok and band_ok and days_ok and struct["ok"])
 
     reasons = []
     if not is_uptrend:
@@ -63,6 +65,7 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
         reasons.append(f"고점경과일 {dsh_int}일 (허용 {krs.CONFIG['DAYS_SINCE_HIGH_MIN']}~{krs.CONFIG['DAYS_SINCE_HIGH_MAX']}일)")
     if not band_ok:
         reasons.append("되돌림비율 범위 밖")
+    reasons.extend(struct["reasons"])
 
     # 경과일 필터에 걸린 종목은 점수 계산에 도달하지 않는다(§4).
     sc = krs.score_row(feat, j) if (is_uptrend and days_ok and not pd.isna(row["retrace_ratio"])) else None
@@ -81,8 +84,16 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
         is_uptrend=is_uptrend,
         is_candidate=is_candidate,
         passes_days_since_high=bool(days_ok),
+        passes_structure=bool(struct["ok"]),
         exclude_reason="; ".join(reasons) if reasons else "",
         retrace_ratio=nn(round(float(row["retrace_ratio"]), 3)) if not pd.isna(row["retrace_ratio"]) else None,
+        retrace_ratio_legacy=nn(round(float(row["retrace_ratio_legacy"]), 3)) if not pd.isna(row["retrace_ratio_legacy"]) else None,
+        days_since_pullback_low=None if pd.isna(row["days_since_pullback_low"]) else int(row["days_since_pullback_low"]),
+        bounce_from_low=nn(round(float(row["bounce_from_low"]) * 100, 2)) if not pd.isna(row["bounce_from_low"]) else None,
+        dd_from_high=nn(round(float(row["dd_from_high"]) * 100, 2)) if not pd.isna(row["dd_from_high"]) else None,
+        range_pct=nn(round(float(row["range_pct"]) * 100, 2)) if not pd.isna(row["range_pct"]) else None,
+        l_leg=nn(round(float(row["l_leg"]), 2)) if not pd.isna(row["l_leg"]) else None,
+        l_pull=nn(round(float(row["l_pull"]), 2)) if not pd.isna(row["l_pull"]) else None,
         disparity_vs_ma20=nn(round(float(row["disparity"]), 3)) if not pd.isna(row["disparity"]) else None,
         ma5=nn(round(float(row["ma5"]), 2)) if not pd.isna(row["ma5"]) else None,
         ma20=nn(round(float(row["ma20"]), 2)) if not pd.isna(row["ma20"]) else None,

@@ -143,7 +143,7 @@ def v4_distribution() -> None:
     calendar = max(feats.values(), key=len).index[-120:]
     counts, funnels = [], {}
     for d in calendar:
-        n_screened = n_band = n_days = n_cand = 0
+        n_screened = n_band = n_days = n_struct = n_cand = 0
         for code, f in feats.items():
             if d not in f.index:
                 continue
@@ -153,9 +153,10 @@ def v4_distribution() -> None:
             n_screened += 1
             n_band += int(r["passes_retrace_band"])
             n_days += int(r["passes_days_since_high"])
+            n_struct += int(r["passes_structure"])
             n_cand += int(r["is_candidate"])
         counts.append(n_cand)
-        funnels[d] = (n_screened, n_band, n_days, n_cand)
+        funnels[d] = (n_screened, n_band, n_days, n_struct, n_cand)
 
     a = np.array(counts)
     zero_ratio = float((a == 0).mean())
@@ -171,10 +172,10 @@ def v4_distribution() -> None:
 
     zero_days = [d for d, c in zip(calendar, counts) if c == 0]
     if zero_days:
-        print(f"    0종목인 날 퍼널 (정배열+되돌림 감지 -> 밴드통과 / 경과일통과 -> 후보):")
+        print(f"    0종목인 날 퍼널 (감지 -> 밴드 / 경과일 / 구조(INV-7) -> 후보):")
         for d in zero_days[:8]:
-            s, b, dd, c = funnels[d]
-            print(f"      {d.date()}  감지 {s} -> 밴드 {b} / 경과일 {dd} -> 후보 {c}")
+            s, b, dd, st, c = funnels[d]
+            print(f"      {d.date()}  감지 {s} -> 밴드 {b} / 경과일 {dd} / 구조 {st} -> 후보 {c}")
 
     ok = zero_ratio <= 0.05 and over20_ratio <= 0.25
     record("V-4 분포 판정", ok,
@@ -224,15 +225,225 @@ def v7_exclusion_rules() -> None:
            f"제외 {len(excluded)}건 전부 ETF 브랜드 (오탐 {len(not_a_product)}건)")
 
 
+# ============================== V-8 ==========================================
+
+def _synthetic(tail: np.ndarray, base_n: int = 180, base_start: float = 10_000.0,
+               daily: float = 1.004) -> pd.DataFrame:
+    """완만한 상승 기반(정배열·거래대금 성립) + 마지막 20봉만 지정한 경로로 붙인다.
+
+    tail 은 base 마지막 종가에 대한 '배율' 배열이다. Series 가 아니라 ndarray 로 넘겨야
+    한다 — 인덱스가 다른 DataFrame 에 Series 를 넣으면 pandas 가 정렬해 전부 NaN 이 된다.
+    """
+    base = base_start * daily ** np.arange(base_n)
+    close = np.concatenate([base, base[-1] * tail])
+    n = len(close)
+    return pd.DataFrame({
+        "open": close, "high": close, "low": close, "close": close,
+        "volume": np.full(n, 1_000_000.0),
+    }, index=pd.bdate_range("2024-01-01", periods=n))
+
+
+def _judge(tail: np.ndarray, label: str) -> dict | None:
+    feat = krs.compute_features(_synthetic(tail))
+    d = feat.index[-1]
+    r = krs.screen_on_date(feat, d, {"code": "TEST", "name": label, "market": "TEST"})
+    row = feat.iloc[-1]
+    print(f"    [{label}] 정배열={bool(row['is_uptrend'])} "
+          f"H={row['h20']:,.0f} L_leg={row['l_leg']:,.0f} L_pull={row['l_pull']:,.0f} 종가={row['close']:,.0f}")
+    print(f"          경과일={row['days_since_high20']:.0f} 바닥경과일={row['days_since_pullback_low']:.0f} "
+          f"되돌림={row['retrace_ratio']:.3f} 상승다리={row['range_pct']*100:.1f}% "
+          f"반등={row['bounce_from_low']*100:.2f}% 최근3일최저={bool(row['is_lowest_recent'])}")
+    print(f"          -> 후보={r['is_candidate'] if r else '행 없음(지표 계산 불가)'}"
+          + (f" / 사유: {r['exclude_reason']}" if r and r["exclude_reason"] else ""))
+    return r
+
+
+def v8_time_structure() -> None:
+    """§7 V-8 — 합성 4케이스 + 전 종목 불변식 (INV-7 회귀 방지)."""
+    print("\n" + "=" * 78)
+    print("V-8. 시계열 구조 테스트 (INV-7)")
+    print("=" * 78)
+
+    # 마지막 20봉: 0..15 상승(① -> ②), 16..19 눌림(③ -> ④)
+    up = np.linspace(1.000, 1.100, 16)          # +10% 상승 다리
+    def with_pull(pull):                        # 고점 이후 경로 (배율)
+        return np.concatenate([up, np.array(pull)])
+
+    # A: 눌림이 오늘까지 이어져 오늘이 바닥 -> 탈락
+    ra = _judge(with_pull([1.078, 1.068, 1.060, 1.055]), "A 오늘이 바닥")
+    ok_a = ra is not None and not ra["is_candidate"] and "오늘이 눌림 바닥" in ra["exclude_reason"]
+    record("V-8a 오늘이 눌림 바닥이면 탈락", ok_a,
+           f"바닥경과일 {ra['days_since_pullback_low'] if ra else 'N/A'}")
+
+    # B: 바닥(16번봉) 이후 3일 반등 -> 통과
+    rb = _judge(with_pull([1.055, 1.065, 1.072, 1.078]), "B 바닥 후 3일 반등")
+    ok_b = rb is not None and rb["is_candidate"]
+    record("V-8b 바닥 후 반등이면 통과", ok_b,
+           f"후보={rb['is_candidate'] if rb else 'N/A'}, 되돌림={rb['retrace_ratio'] if rb else 'N/A'}")
+
+    # C: ① 없음 — 고점이 창 맨 앞이고 이후 하락 후 반등뿐 -> 탈락
+    rc = _judge(np.concatenate([[1.000], np.linspace(0.985, 0.950, 10), np.linspace(0.955, 0.985, 9)]),
+                "C 상승 다리 없음")
+    ok_c = rc is None or not rc["is_candidate"]
+    record("V-8c 상승 다리 없이 하락→반등이면 탈락", ok_c,
+           "행 없음(분모 0)" if rc is None else f"사유: {rc['exclude_reason']}")
+
+    # D: 20일 내내 횡보 (상승 다리 < 5%) -> 탈락
+    wob = 1.0 + 0.012 * np.sin(np.linspace(0, 3 * np.pi, 20))
+    rd = _judge(wob, "D 횡보")
+    ok_d = rd is not None and not rd["is_candidate"] and "상승 다리" in rd["exclude_reason"]
+    record("V-8d 횡보(상승 다리 5% 미만) 탈락", ok_d,
+           f"상승다리 {rd['range_pct']*100:.1f}%" if rd else "행 없음")
+
+    # (e) 전 종목 불변식 — 컬럼 값을 원본 종가에서 독립적으로 재계산해 대조하고,
+    #     통과 종목이 전부 ①<② 이고 바닥경과일 ≥ 1 인지 확인한다.
+    w = krs.CONFIG["RETRACE_WINDOW"]
+    target = pd.Timestamp("2026-09-04")
+    mismatches, order_viol, bounce_viol, checked, n_cand = [], [], [], 0, 0
+    for meta in load_universe():
+        f = load_features(meta["code"])
+        if f is None or target not in f.index:
+            continue
+        j = f.index.get_loc(target)
+        c = f["close"].to_numpy(dtype=float)
+        win = c[j - w:j]
+        hi = j - w + int(np.argmax(win))
+        leg_seg = c[j - w:hi + 1]
+        li = j - w + int(np.argmin(leg_seg))
+        pull_seg = c[hi:j + 1]
+        lpi = hi + int(np.argmin(pull_seg))
+        row = f.iloc[j]
+        if not (row["l_leg"] == c[li] and row["l_pull"] == c[lpi]
+                and row["days_since_pullback_low"] == j - lpi
+                and row["days_since_high20"] == j - hi):
+            mismatches.append(meta["name"])
+        checked += 1
+        r = krs.screen_on_date(f, target, meta)
+        if r and r["is_candidate"]:
+            n_cand += 1
+            if not li < hi:                       # ① 은 ② 보다 앞이어야 한다
+                order_viol.append((meta["name"], li - (j - w), hi - (j - w)))
+            if r["days_since_pullback_low"] < krs.CONFIG["PULLBACK_LOW_MIN_AGE"]:
+                bounce_viol.append((meta["name"], r["days_since_pullback_low"]))
+    print(f"    기준일 {target.date()} · 검사 {checked}종목 · 통과 {n_cand}종목")
+    print(f"      독립 재계산 불일치 {len(mismatches)}건 {mismatches[:5] if mismatches else ''}")
+    print(f"      ①→② 순서 위반 {len(order_viol)}건 {order_viol[:5] if order_viol else ''}")
+    print(f"      바닥경과일 < {krs.CONFIG['PULLBACK_LOW_MIN_AGE']} 위반 {len(bounce_viol)}건")
+    record("V-8e 전 종목 불변식 (①<② · 바닥경과일 ≥ 1 · 컬럼 재계산 일치)",
+           not (mismatches or order_viol or bounce_viol),
+           f"검사 {checked}종목/통과 {n_cand}종목, 위반 {len(mismatches)+len(order_viol)+len(bounce_viol)}건")
+
+
+# ============================== V-9 ==========================================
+
+def v9_old_vs_new() -> None:
+    """§7 V-9 — retrace_ratio(신, 분모 H-L_leg) vs retrace_ratio_legacy(구, 분모 H-L20) 비교."""
+    print("\n" + "=" * 78)
+    print("V-9. 신구 정의 비교 (최근 130거래일 × 전 종목)")
+    print("=" * 78)
+
+    lo, hi_b = krs.CONFIG["RETRACE_MIN"], krs.CONFIG["RETRACE_MAX"]
+    d_lo, d_hi = krs.CONFIG["DAYS_SINCE_HIGH_MIN"], krs.CONFIG["DAYS_SINCE_HIGH_MAX"]
+    n_obs = n_diff = 0
+    old_pass = s_bounce = s_lowest = s_leg = 0
+    max_diff = 0.0
+    old_in_new_out = 0
+
+    for meta in load_universe():
+        f = load_features(meta["code"])
+        if f is None:
+            continue
+        tail = f.tail(130)
+        for _, row in tail.iterrows():
+            new, old = row["retrace_ratio"], row["retrace_ratio_legacy"]
+            if pd.isna(new) or pd.isna(old) or not row["is_uptrend"]:
+                continue
+            n_obs += 1
+            diff = abs(new - old)
+            max_diff = max(max_diff, diff)
+            if diff >= 0.01:
+                n_diff += 1
+            if lo <= old <= hi_b and not (lo <= new <= hi_b):
+                old_in_new_out += 1
+            # 구 기준 통과 신호(= 밴드 + 경과일)를 기준선으로 두고 조건을 하나씩 얹는다
+            dsh = row["days_since_high20"]
+            if not (lo <= old <= hi_b and d_lo <= dsh <= d_hi):
+                continue
+            old_pass += 1
+            if row["days_since_pullback_low"] < krs.CONFIG["PULLBACK_LOW_MIN_AGE"]:
+                continue
+            s_bounce += 1
+            if bool(row["is_lowest_recent"]):
+                continue
+            s_lowest += 1
+            if pd.isna(row["range_pct"]) or row["range_pct"] < krs.CONFIG["RANGE_PCT_MIN"]:
+                continue
+            if not (lo <= new <= hi_b):
+                continue
+            s_leg += 1
+
+    print(f"    비교 관측치 {n_obs:,}건 (정배열 & 두 값 모두 계산 가능한 날)")
+    print(f"    |신-구| ≥ 0.01 인 건수: {n_diff:,}건 ({n_diff/max(n_obs,1):.1%}) · 최대 차이 {max_diff:.3f}")
+    print(f"    구 정의로는 밴드 안 / 신 정의로는 밴드 밖: {old_in_new_out:,}건 (= 잘못 통과했던 신호)")
+    print()
+    print(f"    통과 신호 퍼널")
+    print(f"      구 기준 (되돌림비율 밴드 + 고점경과일)            : {old_pass:,}건")
+    print(f"      + 오늘이 눌림 바닥 아님 (PULLBACK_LOW_MIN_AGE)   : {s_bounce:,}건 ({s_bounce/max(old_pass,1):.0%})")
+    print(f"      + 최근 {krs.CONFIG['NOT_LOWEST_IN_DAYS']}일 최저 아님 (NOT_LOWEST_IN_DAYS)     : {s_lowest:,}건 ({s_lowest/max(old_pass,1):.0%})")
+    print(f"      + 상승 다리 {krs.CONFIG['RANGE_PCT_MIN']*100:.0f}%↑ & 신 정의도 밴드 안        : {s_leg:,}건 ({s_leg/max(old_pass,1):.0%})")
+
+    # 판정: 감소가 실제로 일어났고(회귀 방지), 전부 사라지지는 않았는지만 본다.
+    ok = old_pass > 0 and s_leg < old_pass and s_leg > 0
+    record("V-9 신구 비교 (감소 확인)", ok, f"{old_pass:,} -> {s_leg:,}건 ({s_leg/max(old_pass,1):.0%} 잔존)")
+
+
+# ============================== R-2 ==========================================
+
+def r2_regression_cases() -> None:
+    """§8 R-2 — 실제로 잘못 잡혔던 4건이 전부 탈락하는지."""
+    print("\n" + "=" * 78)
+    print("R-2. 회귀 케이스 (오늘이 눌림 바닥인데 통과했던 건)")
+    print("=" * 78)
+
+    cases = [("011200", "2025-06-27", "HMM"), ("011170", "2025-10-10", "롯데케미칼"),
+             ("247540", "2025-12-18", "에코프로비엠"), ("034020", "2025-12-17", "두산에너빌리티")]
+    survived = []
+    for code, ds, name in cases:
+        f = load_features(code)
+        d = pd.Timestamp(ds)
+        if f is None or d not in f.index:
+            survived.append((code, ds, "캐시 없음"))
+            print(f"    {name}({code}) {ds}: 캐시에 없음 -> 검증 불가")
+            continue
+        r = krs.screen_on_date(f, d, {"code": code, "name": name, "market": "KOSPI"})
+        if r is None:
+            print(f"    {name}({code}) {ds}: 행 없음(정배열/유동성 단계에서 제외)")
+            continue
+        print(f"    {name}({code}) {ds}: 되돌림 신={r['retrace_ratio']} 구={r['retrace_ratio_legacy']} "
+              f"경과일={r['days_since_high20']} 바닥경과일={r['days_since_pullback_low']} "
+              f"반등={r['bounce_from_low']*100:.2f}%")
+        print(f"      -> 후보={r['is_candidate']} / 사유: {r['exclude_reason'] or '(없음)'}")
+        if r["is_candidate"]:
+            survived.append((code, ds, "여전히 통과"))
+    record("R-2 회귀 4건 전부 탈락", not survived,
+           "전부 탈락" if not survived else f"미탈락/검증불가 {survived}")
+
+
 def main() -> int:
-    print("SCREENER_SPEC.md §7 검증 — V-3 / V-4 / V-7")
+    print("SCREENER_SPEC.md §7 검증 — V-3 / V-4 / V-7 / V-8 / V-9 / R-2")
     print(f"CONFIG: DAYS_SINCE_HIGH {krs.CONFIG['DAYS_SINCE_HIGH_MIN']}~{krs.CONFIG['DAYS_SINCE_HIGH_MAX']}일 · "
           f"RETRACE {krs.CONFIG['RETRACE_MIN']}~{krs.CONFIG['RETRACE_MAX']} · "
           f"FRESHNESS_IDEAL {krs.CONFIG['FRESHNESS_IDEAL_MIN']}~{krs.CONFIG['FRESHNESS_IDEAL_MAX']}일")
+    print(f"        INV-7: RANGE_PCT_MIN {krs.CONFIG['RANGE_PCT_MIN']:.0%} · "
+          f"PULLBACK_LOW_MIN_AGE {krs.CONFIG['PULLBACK_LOW_MIN_AGE']}일 · "
+          f"NOT_LOWEST_IN_DAYS {krs.CONFIG['NOT_LOWEST_IN_DAYS']}일")
 
     v3_days_since_high()
     v4_distribution()
     v7_exclusion_rules()
+    v8_time_structure()
+    v9_old_vs_new()
+    r2_regression_cases()
 
     print("\n" + "=" * 78)
     n_pass = sum(1 for _, p, _ in results if p)

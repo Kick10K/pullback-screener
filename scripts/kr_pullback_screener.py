@@ -81,9 +81,20 @@ CONFIG = dict(
 
     # --- retracement (되돌림), 종가 기준 ---
     RETRACE_WINDOW = 20,            # 당일을 제외한 최근 N일 종가로 고점/저점을 잡음.
-    RETRACE_MIN = 0.20,             # 통과 하한. (H-종가)/(H-L) 이 값 미만이면 눌림이 너무 얕음 -> 제외.
+    RETRACE_MIN = 0.20,             # 통과 하한. (H-종가)/(H-L_leg) 이 값 미만이면 눌림이 너무 얕음 -> 제외.
     RETRACE_MAX = 0.70,             # 통과 상한. 이 값 초과면 추세 훼손 수준의 눌림 -> 제외.
                                      # 비율 자체는 필터로 잘라도 결과 테이블 컬럼에는 항상 남긴다.
+
+    # --- 시계열 구조 조건 (INV-7): ① L_leg -> ② H -> ③ L_pull -> ④ 오늘 ---
+    RANGE_PCT_MIN = 0.05,           # 상승 다리 (H-L_leg)/L_leg 하한. 이 아래면 '눌림'이 아니라 횡보의
+                                     # 노이즈 고점/저점이다. 횡보에서도 ①②③④는 기계적으로 항상 존재하므로,
+                                     # 상승 다리가 실재하는지 보는 이 조건이 INV-7의 전제다.
+                                     # 내리면(=0) 방향성 없는 횡보 종목이 되돌림비율 밴드에 우연히 들어와 섞인다.
+    PULLBACK_LOW_MIN_AGE = 1,       # 눌림 바닥(③) 이후 최소 경과 거래일. 0으로 내리면 '오늘이 바닥'인,
+                                     # 즉 아직 하락 중이라 내일 더 빠질지 모르는 신호가 다시 44% 섞인다.
+                                     # 0으로 두지 말 것. 올리면 반등 확인은 확실해지나 진입이 늦어진다.
+    NOT_LOWEST_IN_DAYS = 3,         # 당일 종가가 최근 N일(당일 포함) 최저면 탈락시키는 보조 조건.
+                                     # 1이면 항상 참이라 사실상 무효. 올리면 반등 확인이 엄격해지고 후보가 빠르게 준다.
 
     # --- 되돌림 구간 형성 조건 (INV-4) ---
     DAYS_SINCE_HIGH_MIN = 2,        # 고점 이후 최소 경과 거래일. 1이면 '고점 다음날 음봉 하나'일 뿐 되돌림 구간이
@@ -274,18 +285,44 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     prior_close = x["close"].shift(1)
     x["h20"] = prior_close.rolling(w).max()
     x["l20"] = prior_close.rolling(w).min()
-    rng = x["h20"] - x["l20"]
-    x["retrace_ratio"] = np.where(rng > 0, (x["h20"] - x["close"]) / rng, np.nan)
+    # 구 정의: 분모가 20일 창 '전체'의 최저값. 고점보다 뒤에 있는 저점이 분모에 섞일 수 있어
+    # 되돌림률과 반등률이 한 컬럼에 뒤엉킨다. INV-3 하위호환용으로 값만 병기 보존한다(§2).
+    rng_legacy = x["h20"] - x["l20"]
+    x["retrace_ratio_legacy"] = np.where(rng_legacy > 0, (x["h20"] - x["close"]) / rng_legacy, np.nan)
 
-    # days since the 20-session closing high (h20) was actually set
-    close_arr = x["close"].to_numpy()
+    # INV-7: 20일 창을 고점 기준으로 둘로 쪼갠다 (§2 의사코드).
+    #   ① L_leg  = min(close[t-N : H_date+1])  상승 다리의 시작 저점 -> retrace_ratio 분모
+    #   ③ L_pull = min(close[H_date : t+1])    눌림 바닥 (당일 포함)
+    # days_since_high20을 구하던 루프에서 고점 인덱스를 그대로 재사용한다.
+    close_arr = x["close"].to_numpy(dtype=float)
     n = len(x)
     days_since_high = np.full(n, np.nan)
+    l_leg = np.full(n, np.nan)
+    l_pull = np.full(n, np.nan)
+    days_since_pullback_low = np.full(n, np.nan)
     for j in range(w + 1, n):
         window = close_arr[j - w:j]  # matches prior_close.shift/rolling alignment
-        peak_offset_from_end = w - 1 - int(np.argmax(window))
-        days_since_high[j] = peak_offset_from_end + 1  # +1 because window ends at j-1
+        hi = j - w + int(np.argmax(window))            # ② H_date (절대 인덱스)
+        days_since_high[j] = j - hi
+        l_leg[j] = close_arr[j - w:hi + 1].min()       # ① 고점 '이전' 구간 (고점일 포함)
+        seg = close_arr[hi:j + 1]                      # ③ 고점 '이후' 구간 (당일 포함)
+        lpi = hi + int(np.argmin(seg))
+        l_pull[j] = close_arr[lpi]
+        days_since_pullback_low[j] = j - lpi           # 0이면 오늘이 바닥 -> 탈락
     x["days_since_high20"] = days_since_high
+    x["l_leg"] = l_leg
+    x["l_pull"] = l_pull
+    x["days_since_pullback_low"] = days_since_pullback_low
+
+    leg = x["h20"] - x["l_leg"]                        # 상승 다리 폭
+    x["retrace_ratio"] = np.where(leg > 0, (x["h20"] - x["close"]) / leg, np.nan)
+    x["range_pct"] = np.where(x["l_leg"] > 0, leg / x["l_leg"], np.nan)
+    x["bounce_from_low"] = np.where(x["l_pull"] > 0, (x["close"] - x["l_pull"]) / x["l_pull"], np.nan)
+    x["dd_from_high"] = np.where(x["h20"] > 0, (x["h20"] - x["close"]) / x["h20"], np.nan)
+
+    # 최근 N일(당일 포함) 최저 종가인가 -- ③→④ 반등 보조 조건
+    nl = CONFIG["NOT_LOWEST_IN_DAYS"]
+    x["is_lowest_recent"] = x["close"] <= x["close"].rolling(nl).min()
 
     x["trading_value_eok"] = x["close"] * x["volume"] / 1e8
 
@@ -385,6 +422,29 @@ def score_row(x: pd.DataFrame, j: int) -> dict:
     )
 
 
+def structure_verdict(row: pd.Series) -> dict:
+    """INV-7: 가격이 ① L_leg -> ② H -> ③ L_pull -> ④ 오늘 순서를 지나왔는지 판정한다.
+
+    screen_on_date()와 대시보드가 같은 함수를 쓰게 해서 CSV와 대시보드 판정이 갈라지지
+    않게 한다(INV-4와 같은 이유). 탈락시키더라도 지표 컬럼 자체는 호출측에서 남긴다(INV-3).
+    """
+    reasons: list[str] = []
+
+    rp = row["range_pct"]
+    if pd.isna(rp) or rp < CONFIG["RANGE_PCT_MIN"]:
+        shown = "N/A" if pd.isna(rp) else f"{rp * 100:.1f}%"
+        reasons.append(f"상승 다리 {shown} (최소 {CONFIG['RANGE_PCT_MIN'] * 100:.0f}%)")
+
+    dspl = row["days_since_pullback_low"]
+    if pd.isna(dspl) or dspl < CONFIG["PULLBACK_LOW_MIN_AGE"]:
+        reasons.append("오늘이 눌림 바닥 (반등 미확인)")
+
+    if bool(row["is_lowest_recent"]):
+        reasons.append(f"최근 {CONFIG['NOT_LOWEST_IN_DAYS']}일 최저 종가")
+
+    return dict(ok=not reasons, reasons=reasons)
+
+
 def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict | None:
     if date not in feat.index:
         return None
@@ -404,6 +464,7 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
     passes_days = dsh_int is not None and (
         CONFIG["DAYS_SINCE_HIGH_MIN"] <= dsh_int <= CONFIG["DAYS_SINCE_HIGH_MAX"]
     )
+    struct = structure_verdict(row)  # INV-7: ①→②→③→④ 순서 확인
 
     reasons = []
     if not passes_days:
@@ -414,6 +475,7 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
         reasons.append(
             f"되돌림비율 {row['retrace_ratio']:.3f} (허용 {CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']})"
         )
+    reasons.extend(struct["reasons"])
 
     # 경과일 필터에 걸린 종목은 점수 계산에 도달하지 않는다(§4).
     sc = score_row(feat, j) if passes_days else dict(
@@ -425,13 +487,19 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
         date=date.strftime("%Y-%m-%d"),
         close=float(row["close"]), mcap_eok=meta.get("mcap_eok"),
         retrace_ratio=round(float(row["retrace_ratio"]), 3),
+        retrace_ratio_legacy=None if pd.isna(row["retrace_ratio_legacy"]) else round(float(row["retrace_ratio_legacy"]), 3),
         passes_retrace_band=bool(passes_band),
         passes_days_since_high=bool(passes_days),
-        is_candidate=bool(passes_band and passes_days),
+        passes_structure=bool(struct["ok"]),
+        is_candidate=bool(passes_band and passes_days and struct["ok"]),
         exclude_reason="; ".join(reasons) if reasons else "",
         ma5=float(row["ma5"]), ma20=float(row["ma20"]), ma60=float(row["ma60"]), ma120=float(row["ma120"]),
         disparity_vs_ma20=round(float(row["disparity"]), 3),
         days_since_high20=dsh_int,
+        days_since_pullback_low=None if pd.isna(row["days_since_pullback_low"]) else int(row["days_since_pullback_low"]),
+        bounce_from_low=None if pd.isna(row["bounce_from_low"]) else round(float(row["bounce_from_low"]), 4),
+        dd_from_high=None if pd.isna(row["dd_from_high"]) else round(float(row["dd_from_high"]), 4),
+        range_pct=None if pd.isna(row["range_pct"]) else round(float(row["range_pct"]), 4),
         avg_trading_value20_eok=round(float(avg_val20), 1),
         **sc,
     )
@@ -626,9 +694,14 @@ def main():
     final = [r for r in all_candidates if r["is_candidate"]]
     n_band = sum(1 for r in all_candidates if r["passes_retrace_band"])
     n_days_out = sum(1 for r in all_candidates if not r["passes_days_since_high"])
+    n_struct_out = sum(1 for r in all_candidates if not r["passes_structure"])
+    n_at_low = sum(1 for r in all_candidates if (r["days_since_pullback_low"] or 0) < CONFIG["PULLBACK_LOW_MIN_AGE"])
+    n_flat = sum(1 for r in all_candidates if (r["range_pct"] is None or r["range_pct"] < CONFIG["RANGE_PCT_MIN"]))
     print(f"      정배열+눌림 감지: {len(all_candidates)}종목")
     print(f"      되돌림비율 {CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']} 통과: {n_band}종목")
     print(f"      고점경과일 {CONFIG['DAYS_SINCE_HIGH_MIN']}~{CONFIG['DAYS_SINCE_HIGH_MAX']}일 밖으로 탈락: {n_days_out}종목")
+    print(f"      시계열 구조(INV-7) 탈락: {n_struct_out}종목 "
+          f"(오늘이 바닥 {n_at_low} / 상승다리 {CONFIG['RANGE_PCT_MIN']*100:.0f}% 미만 {n_flat})")
     print(f"      최종 후보: {len(final)}종목")
 
     date_str = run_date.strftime("%Y%m%d")
