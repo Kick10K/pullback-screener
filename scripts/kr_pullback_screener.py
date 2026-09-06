@@ -80,7 +80,14 @@ CONFIG = dict(
     DISPARITY_MAX = 1.15,           # 이격도가 이 값을 넘으면(20일선 대비 +15% 초과) 과열로 보고 제외.
 
     # --- retracement (되돌림), 종가 기준 ---
-    RETRACE_WINDOW = 20,            # 당일을 제외한 최근 N일 종가로 고점/저점을 잡음.
+    HIGH_LOOKBACK = 20,             # ② 고점 탐색 창. 당일을 제외한 최근 N일 종가에서 H를 잡는다.
+                                     # 올리면 낡은 고점이 기준이 되고, 내리면 사소한 봉우리마다 신호가 난다.
+    LEG_LOOKBACK = 40,              # ① 상승 다리 시작점(L_leg) 탐색 창. H_date 이전으로 이 일수까지 거슬러
+                                     # 올라가 최저 종가를 찾는다. 고점 창(20일)과 같게 두면 상승 다리가
+                                     # 창 경계에서 잘려 분모가 실제보다 작아지고 되돌림비율이 부풀려진다
+                                     # (R-4 심텍: 20일이면 0.385 통과, 실제 다리로는 0.174 탈락).
+                                     # 내리면 그 절단이 되살아나고, 올리면 다리 시작점이 몇 달 전 저점까지
+                                     # 내려가 되돌림비율이 전부 밴드 아래로 깔린다.
     RETRACE_MIN = 0.20,             # 통과 하한. (H-종가)/(H-L_leg) 이 값 미만이면 눌림이 너무 얕음 -> 제외.
     RETRACE_MAX = 0.70,             # 통과 상한. 이 값 초과면 추세 훼손 수준의 눌림 -> 제외.
                                      # 비율 자체는 필터로 잘라도 결과 테이블 컬럼에는 항상 남긴다.
@@ -325,7 +332,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     x["is_stacked"] = (x[f"ma{p5}"] > x[f"ma{p20}"]) & (x[f"ma{p20}"] > x[f"ma{p60}"]) & (x[f"ma{p60}"] > x[f"ma{p120}"])
     x["is_uptrend"] = x["is_stacked"] & x["ma60_slope_up"] & (x["disparity"] <= CONFIG["DISPARITY_MAX"])
 
-    w = CONFIG["RETRACE_WINDOW"]
+    w = CONFIG["HIGH_LOOKBACK"]
     prior_close = x["close"].shift(1)
     x["h20"] = prior_close.rolling(w).max()
     x["l20"] = prior_close.rolling(w).min()
@@ -334,27 +341,34 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     rng_legacy = x["h20"] - x["l20"]
     x["retrace_ratio_legacy"] = np.where(rng_legacy > 0, (x["h20"] - x["close"]) / rng_legacy, np.nan)
 
-    # INV-7: 20일 창을 고점 기준으로 둘로 쪼갠다 (§2 의사코드).
-    #   ① L_leg  = min(close[t-N : H_date+1])  상승 다리의 시작 저점 -> retrace_ratio 분모
-    #   ③ L_pull = min(close[H_date : t+1])    눌림 바닥 (당일 포함)
+    # INV-7: 창을 고점 기준으로 둘로 쪼갠다 (§2 의사코드).
+    #   ① L_leg  = min(close[t-LEG_LOOKBACK : H_date+1])  상승 다리의 시작 저점 -> retrace_ratio 분모
+    #   ③ L_pull = min(close[H_date : t+1])               눌림 바닥 (당일 포함)
+    # 다리 탐색 창은 고점 탐색 창보다 넓다(R-4). 같으면 다리가 창 경계에서 잘린다.
     # days_since_high20을 구하던 루프에서 고점 인덱스를 그대로 재사용한다.
+    lw = CONFIG["LEG_LOOKBACK"]
     close_arr = x["close"].to_numpy(dtype=float)
     n = len(x)
     days_since_high = np.full(n, np.nan)
     l_leg = np.full(n, np.nan)
+    l_leg_age = np.full(n, np.nan)      # 기준일로부터 L_leg까지의 거래일 수 (차트 ① 마커용)
     l_pull = np.full(n, np.nan)
     days_since_pullback_low = np.full(n, np.nan)
     for j in range(w + 1, n):
         window = close_arr[j - w:j]  # matches prior_close.shift/rolling alignment
         hi = j - w + int(np.argmax(window))            # ② H_date (절대 인덱스)
         days_since_high[j] = j - hi
-        l_leg[j] = close_arr[j - w:hi + 1].min()       # ① 고점 '이전' 구간 (고점일 포함)
+        leg_start = max(0, j - lw)                     # ① 탐색 시작 (고점 창보다 넓다)
+        li = leg_start + int(np.argmin(close_arr[leg_start:hi + 1]))
+        l_leg[j] = close_arr[li]
+        l_leg_age[j] = j - li
         seg = close_arr[hi:j + 1]                      # ③ 고점 '이후' 구간 (당일 포함)
         lpi = hi + int(np.argmin(seg))
         l_pull[j] = close_arr[lpi]
         days_since_pullback_low[j] = j - lpi           # 0이면 오늘이 바닥 -> 탈락
     x["days_since_high20"] = days_since_high
     x["l_leg"] = l_leg
+    x["days_since_leg_low"] = l_leg_age
     x["l_pull"] = l_pull
     x["days_since_pullback_low"] = days_since_pullback_low
 
@@ -415,6 +429,50 @@ def peak_date_of(x: pd.DataFrame, j: int) -> str | None:
         return None
     peak_i = j - int(d)
     return x.index[peak_i].strftime("%Y-%m-%d") if 0 <= peak_i < len(x) else None
+
+
+def structure_points(x: pd.DataFrame, j: int) -> dict:
+    """INV-7의 ①②③④ 네 지점을 (날짜, 값, 경과 거래일)로 돌려준다.
+
+    화면 표시 전용이지만 좌표는 반드시 판정과 같은 컬럼에서 뽑는다 — 차트가 그리는 점과
+    스크리너가 계산한 값이 갈라지면 그림이 결함을 감춘다(R-4).
+    ②는 **종가** 고점이다. 장중 고가가 더 높은 봉과 다를 수 있고 그게 정상이다(INV-1).
+    """
+    def at(age) -> tuple[str | None, float | None]:
+        if pd.isna(age):
+            return None, None
+        i = j - int(age)
+        if not (0 <= i < len(x)):
+            return None, None
+        return x.index[i].strftime("%Y-%m-%d"), float(x["close"].iloc[i])
+
+    leg_age = x["days_since_leg_low"].iloc[j]
+    high_age = x["days_since_high20"].iloc[j]
+    pull_age = x["days_since_pullback_low"].iloc[j]
+    leg_date, leg_close = at(leg_age)
+    high_date, high_close = at(high_age)
+    pull_date, pull_close = at(pull_age)
+
+    def age_int(v):
+        return None if pd.isna(v) else int(v)
+
+    # 탐색 창의 시작 날짜 — 차트 음영용. 어느 구간에서 뽑은 값인지 보이게 한다.
+    def win_start(n: int) -> str:
+        return x.index[max(0, j - n)].strftime("%Y-%m-%d")
+
+    la, ha, pa = age_int(leg_age), age_int(high_age), age_int(pull_age)
+    # ① < ② < ③ ≤ ④ (④는 기준일이므로 경과일 0). 경과일은 클수록 과거다.
+    order_ok = None if None in (la, ha, pa) else bool(la > ha > pa >= 0)
+
+    return dict(
+        leg_date=leg_date, leg_close=leg_close, leg_age=la,
+        high_date=high_date, high_close=high_close, high_age=ha,
+        pull_date=pull_date, pull_close=pull_close, pull_age=pa,
+        base_date=x.index[j].strftime("%Y-%m-%d"), base_close=float(x["close"].iloc[j]),
+        high_win_start=win_start(CONFIG["HIGH_LOOKBACK"]),
+        leg_win_start=win_start(CONFIG["LEG_LOOKBACK"]),
+        order_ok=order_ok,
+    )
 
 
 def score_row(x: pd.DataFrame, j: int) -> dict:

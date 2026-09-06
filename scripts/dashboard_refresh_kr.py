@@ -95,6 +95,8 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
         range_pct=nn(round(float(row["range_pct"]) * 100, 2)) if not pd.isna(row["range_pct"]) else None,
         l_leg=nn(round(float(row["l_leg"]), 2)) if not pd.isna(row["l_leg"]) else None,
         l_pull=nn(round(float(row["l_pull"]), 2)) if not pd.isna(row["l_pull"]) else None,
+        # INV-7 ①②③④ 좌표 — 차트 마커·수평선·탐색 창 음영이 전부 여기서 나온다
+        structure=krs.structure_points(feat, j),
         disparity_vs_ma20=nn(round(float(row["disparity"]), 3)) if not pd.isna(row["disparity"]) else None,
         ma5=nn(round(float(row["ma5"]), 2)) if not pd.isna(row["ma5"]) else None,
         ma20=nn(round(float(row["ma20"]), 2)) if not pd.isna(row["ma20"]) else None,
