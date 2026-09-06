@@ -211,6 +211,18 @@ def v7_exclusion_rules() -> None:
         detail += " · 실패: " + ", ".join(f"{n}({l})" for n, l, _, _ in failed)
     record("V-7 제외 규칙", not failed, detail)
 
+    # ETF 브랜드 접두어(ACE·SOL·PLUS 등 짧은 토큰)가 일반 기업을 잡아채지 않는지 확인.
+    # 이 규칙이 새로 만드는 위험이 바로 오탐이므로, 제외되는 이름은 전부 브랜드 접두어로
+    # 시작해야 한다. 우선주/리츠 규칙이 엉뚱하게 발동하는 경우도 여기서 걸린다.
+    universe = load_universe()
+    excluded = [m["name"] for m in universe if krs.is_excluded_name(m["name"])]
+    brands = tuple(b.upper() for b in krs.CONFIG["ETF_BRAND_PREFIXES"])
+    not_a_product = [n for n in excluded if not n.strip().upper().startswith(brands)]
+    print(f"    실제 유니버스 {len(universe)}종목 중 제외 대상 {len(excluded)}건: {excluded}")
+    print(f"      -> 상장상품이 아닌데 제외된 건: {len(not_a_product)}건 {not_a_product if not_a_product else ''}")
+    record("V-7b 일반 기업 오탐 없음", not not_a_product,
+           f"제외 {len(excluded)}건 전부 ETF 브랜드 (오탐 {len(not_a_product)}건)")
+
 
 def main() -> int:
     print("SCREENER_SPEC.md §7 검증 — V-3 / V-4 / V-7")

@@ -275,13 +275,14 @@ days_since_high20 = 1 · 점수 69.7
 | 1 | INV-4 | `DAYS_SINCE_HIGH_MIN/MAX` 필터를 `screen_on_date()`·대시보드 양쪽에 추가. 탈락 종목은 `is_candidate=False` + `exclude_reason`으로 보존 | V-3a/b/c 통과. 기준일 2026-09-04 후보 5 → 2종목, R-1 탈락 |
 | 2 | §4 | `freshness_score()` 고원형으로 교체. 경과일 필터 탈락 시 `score=None` | V-3d 통과 (1일 0.33 < 4일 1.00) |
 | 3 | INV-6 | **전제가 사실이 아니었음.** 소스는 이미 분할·증자 조정됨(배당 미조정). 문구 정정 + `detect_price_discontinuity()` 상시 가드 추가 | 141종목×3년 ±30% 밖 불연속 0건, 야후 raw 대비 중앙값 1.0000 |
+| 5-a | §3-1 | ETF/ETN/ELW 이름 제외 추가 (`ETF_BRAND_PREFIXES`). 접두어 뒤 공백/숫자를 확인해 ACE·SOL·PLUS 오탐 방지 | V-7 7/7 통과. **실제 유니버스에 섞여 있던 ETF 2종(`KODEX 머니마켓액티브`, `KODEX 200TR`) 제거 → 141 → 139종목** |
 
 ### 미처리
 
 | # | 항목 | 심각도 | 내용 |
 |---|---|---|---|
 | 4 | §3-3 | 중간 | `dd_from_high`, `range_pct`, "최근 3일 최저 종가" 필터 부재 |
-| 5 | §3-1 | 중간 | ETF/ETN 제외 누락(**V-7 KODEX 200 실패 중**), 관리종목/거래정지 처리 없음 |
+| 5-b | §3-1 / §5 | 중간 | 관리종목/거래정지/투자경고 처리 — 네이버 아이콘 best-effort만 있고 `config/exclude_tickers.txt`·데이터 휴리스틱 미구현. 우선주 종목코드 끝자리 판별도 미적용 |
 | 6 | §3-2 | 중간 | `MA60_SLOPE_LOOKBACK = 5` 너무 짧음, 이격도 하한 없음 |
 | 7 | §4 | 낮음 | `advance_vol` 20일 → 5일로 좁힐 것 |
 | 8 | §3 | 낮음 | 퍼널 출력 — 실행 로그·V-4 0종목일 퍼널에는 반영됨. CSV/HTML 단계별 집계는 미완 |

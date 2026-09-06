@@ -66,6 +66,12 @@ CONFIG = dict(
         r"(우[A-Z]?B?$|스팩\d*호?$|리츠$)"     # 이름 규칙이 더 안정적이라 이름 기준으로 제외.
     ),                                   # 주의: "리츠"는 끝 앵커($) 필수 -- 안 그러면 "메리츠금융지주"처럼
                                           # 리츠가 아닌데 이름에 "리츠"가 들어간 회사가 오탐된다.
+    ETF_BRAND_PREFIXES = (          # ETF/ETN/ELW 브랜드 접두어 (§3-1). 새 브랜드가 생기면 여기에만 추가한다.
+        "KODEX", "TIGER", "KBSTAR", "ACE", "RISE", "PLUS", "SOL", "KOSEF",
+        "ARIRANG", "HANARO", "TIMEFOLIO", "KIWOOM", "VITA", "UNICORN", "BNK",
+    ),                                   # 접두어로 시작하고 '뒤에 공백이나 숫자가 오는' 경우만 상장상품으로 본다.
+                                          # 뒤 문자를 확인하지 않으면 ACE/SOL/PLUS 같은 짧은 토큰이 일반
+                                          # 종목명에 부분 일치해 오탐한다. 확인을 없애면 정상 기업이 사라진다.
 
     # --- trend filter (정배열) ---
     MA_PERIODS = (5, 20, 60, 120),  # 정배열 판정에 쓰는 이동평균 기간.
@@ -123,8 +129,23 @@ def http_get_text(url: str, encoding: str, timeout: int = 20) -> str:
 # ============================ universe building =============================
 
 def is_excluded_name(name: str) -> bool:
-    """종목명만으로 우선주/스팩/리츠를 걸러낸다 (§3-1). 판별 규칙은 CONFIG에만 둔다."""
-    return bool(CONFIG["EXCLUDE_NAME_RE"].search(str(name)))
+    """종목명만으로 우선주/스팩/리츠/ETF·ETN·ELW를 걸러낸다 (§3-1).
+
+    판별 규칙은 CONFIG에만 둔다(INV-5). 유니버스는 KIND 상장법인 목록과도 대조하므로
+    실제 파이프라인에서는 ETF가 이중으로 걸러지지만, 이름만으로도 판별 가능해야 한다.
+    """
+    s = str(name).strip()
+    if CONFIG["EXCLUDE_NAME_RE"].search(s):
+        return True
+
+    upper = s.upper()
+    for brand in CONFIG["ETF_BRAND_PREFIXES"]:
+        if upper.startswith(brand):
+            rest = upper[len(brand):]
+            if rest == "" or rest[0].isspace() or rest[0].isdigit():
+                return True
+
+    return bool(re.search(r"\b(ETN|ELW)\b", upper))
 
 
 def fetch_kind_listing(market_type: str) -> pd.DataFrame:
