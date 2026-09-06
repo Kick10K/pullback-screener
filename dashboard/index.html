@@ -108,6 +108,10 @@
   #legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 4px 0 6px; font-size: 11px; color: var(--text-dim); }
   #legend span { display: inline-flex; align-items: center; gap: 4px; }
   #legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  #chartInfo { display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline; margin: 2px 0 6px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums;
+    font-size: 11.5px; color: var(--text-dim); min-height: 17px; }
+  #chartInfo b { color: var(--text); font-size: 12.5px; }
   #chart { width: 100%; height: 460px; }
   #chartStatus { padding: 60px 0; text-align: center; color: var(--text-dim); font-size: 13px; }
 
@@ -291,6 +295,7 @@
       <span><i style="background:var(--up)"></i>20일 고점(점선)</span>
       <span><i style="background:var(--down)"></i>20일 저점(점선)</span>
     </div>
+    <div id="chartInfo"></div>
     <div id="chart"></div>
     <div id="chartStatus" style="display:none"></div>
   </div>
@@ -416,12 +421,29 @@
 
   // ---- chart panel ----
   var overlay = document.getElementById("overlay");
+  var chartResizeObserver = null;
   function closePanel() { overlay.classList.remove("show"); }
   document.getElementById("pClose").addEventListener("click", closePanel);
   overlay.addEventListener("click", function (e) { if (e.target === overlay) closePanel(); });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") closePanel(); });
 
   function styleVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function fade(hex, alpha) {
+    var m = /^#([0-9a-f]{6})$/i.exec(hex);
+    if (!m) return hex;
+    var n = parseInt(m[1], 16);
+    return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + alpha + ")";
+  }
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  // lightweight-charts 는 'YYYY-MM-DD' 문자열을 {year, month, day} 로 바꿔 넘겨준다.
+  function ymd(t) {
+    if (t && typeof t === "object" && t.year) return { y: t.year, m: t.month, d: t.day };
+    var s = String(t).split("-");
+    return { y: +s[0], m: +s[1], d: +s[2] };
+  }
 
   function drawChart(bars, row) {
     var el = document.getElementById("chart");
@@ -435,13 +457,23 @@
       st.textContent = "차트 데이터를 불러올 수 없습니다.";
       return;
     }
+    // 패널이 막 열리는 순간이면 clientWidth 가 0으로 잡혀 캔버스가 폭 0으로 생성된다.
+    // 폭을 보수적으로 잡고, 아래 ResizeObserver 로 실제 폭에 맞춰 다시 세팅한다.
+    var initialWidth = el.clientWidth || (el.parentElement && el.parentElement.clientWidth) || 820;
     var chart = LightweightCharts.createChart(el, {
-      width: el.clientWidth, height: 460,
+      width: initialWidth, height: 460,
       layout: { background: { color: "transparent" }, textColor: styleVar("--text-dim"), fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
       grid: { vertLines: { color: styleVar("--border") }, horzLines: { color: styleVar("--border") } },
       rightPriceScale: { borderColor: styleVar("--border") },
-      timeScale: { borderColor: styleVar("--border") },
+      timeScale: {
+        borderColor: styleVar("--border"),
+        // 기본 포맷은 '5월' / "19 3월 '26" 처럼 섞여 나와서 어느 날짜인지 읽기 어렵다.
+        tickMarkFormatter: function (t) { var v = ymd(t); return v.m + "/" + v.d; },
+      },
       crosshair: { mode: 0 },
+      localization: {
+        dateFormat: "yyyy-MM-dd",
+      },
     });
     chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.02, bottom: 0.52 } });
 
@@ -453,18 +485,18 @@
     });
     candle.setData(bars.map(function (b) { return { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close }; }));
 
+    // 고점/저점 기준선. title 을 달면 차트 위에 불투명한 라벨 박스가 얹혀 캔들을 가리므로,
+    // 값은 오른쪽 축 라벨로만 보여주고 선은 옅은 점선으로 둔다. 수치는 위 통계줄에 이미 있다.
     if (row && row.h20 != null) {
       candle.createPriceLine({
-        price: row.h20, color: styleVar("--up"), lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
-        title: "20일 고점 " + Math.round(row.h20).toLocaleString(),
+        price: row.h20, color: fade(styleVar("--up"), 0.45),
+        lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
       });
     }
     if (row && row.l20 != null) {
-      var lowTitle = "20일 저점 " + Math.round(row.l20).toLocaleString();
-      if (row.depth_pct != null) lowTitle += "  (고점 대비 -" + row.depth_pct.toFixed(1) + "%)";
       candle.createPriceLine({
-        price: row.l20, color: styleVar("--down"), lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
-        title: lowTitle,
+        price: row.l20, color: fade(styleVar("--down"), 0.45),
+        lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
       });
     }
 
@@ -490,6 +522,42 @@
     macdLine.setData(bars.filter(function (b) { return b.macd != null; }).map(function (b) { return { time: b.time, value: b.macd }; }));
     var macdSignal = chart.addLineSeries({ color: styleVar("--macd-signal"), lineWidth: 1, priceScaleId: "macd", priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
     macdSignal.setData(bars.filter(function (b) { return b.macd_signal != null; }).map(function (b) { return { time: b.time, value: b.macd_signal }; }));
+
+    // 어느 날짜의 가격인지 바로 읽히도록, 커서가 놓인 봉의 날짜·시고저종·거래량을 위에 표시한다.
+    var info = document.getElementById("chartInfo");
+    var last = bars[bars.length - 1];
+
+    function renderInfo(b) {
+      if (!b) { info.innerHTML = ""; return; }
+      var v = ymd(b.time);
+      var upDay = b.close >= b.open;
+      info.innerHTML =
+        '<b>' + v.y + "-" + pad2(v.m) + "-" + pad2(v.d) + '</b>' +
+        '<span>시 ' + b.open.toLocaleString() + '</span>' +
+        '<span>고 ' + b.high.toLocaleString() + '</span>' +
+        '<span>저 ' + b.low.toLocaleString() + '</span>' +
+        '<span class="' + (upDay ? "up" : "down") + '">종 ' + b.close.toLocaleString() + '</span>' +
+        '<span>거래량 ' + b.volume.toLocaleString() + '</span>';
+    }
+
+    renderInfo(last);
+    var byTime = {};
+    bars.forEach(function (b) { byTime[b.time] = b; });
+    chart.subscribeCrosshairMove(function (param) {
+      if (!param || !param.time) { renderInfo(last); return; }
+      var v = ymd(param.time);
+      renderInfo(byTime[v.y + "-" + pad2(v.m) + "-" + pad2(v.d)] || last);
+    });
+
+    // 창 크기나 패널 폭이 바뀌어도 차트가 따라오게 한다 (생성 시점 폭에 고정되지 않도록).
+    if (chartResizeObserver) { chartResizeObserver.disconnect(); chartResizeObserver = null; }
+    if (window.ResizeObserver) {
+      chartResizeObserver = new ResizeObserver(function (entries) {
+        var w = Math.floor(entries[0].contentRect.width);
+        if (w > 0) chart.applyOptions({ width: w });
+      });
+      chartResizeObserver.observe(el);
+    }
 
     chart.timeScale().fitContent();
   }
