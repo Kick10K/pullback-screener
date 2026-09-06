@@ -428,6 +428,27 @@ LG씨엔에스         039490           키움증권
 달라 보이는 것은 **종가 고점 vs 장중 고점**의 차이이며 INV-1대로 정상 동작이다.
 차트에 ②를 종가 기준으로 명시하면 이 혼동이 사라진다.
 
+### R-5. 낡은 DB 문서가 화면을 되돌림 — 씨젠(096530) ①②③④ 전부 `–` (2026-09-06 발견·수정)
+
+R-4 표시 작업을 마치고 배포했는데, 실제 Artifact 에서 종목을 열면 ①②③④ 카드가 전부 `–`
+로 떴다. 헤더의 `20일 종가 고점 2026-08-28`(= `peak_date`, 구 데이터에도 있던 필드)만 나왔다.
+
+원인: 페이지는 SEED 로 먼저 그린 뒤 `kr_screener_summary/latest` 를 읽어
+**payload 를 통째로 교체**한다. 그 DB 문서가 갱신되지 않아 139종목·정배열 11·후보 2의
+INV-7 이전 데이터였고, `structure`·`sector`·`dd_from_high` 같은 새 필드가 아예 없었다.
+차트도 `getBars()` 가 DB 만 보고 있어 새로 편입된 108종목은 문서가 없어 실패했다.
+
+**이 결함이 검증을 통과한 이유**가 더 중요하다. 로컬 `http://localhost` 에는
+`window.claude` 가 없어 DB 배선이 통째로 건너뛰어지고 SEED 만 그려진다.
+로컬에서만 확인해서 "정상"으로 보고했다. **런타임 기능이 붙은 페이지는 배포본에서 확인해야 한다.**
+
+수정:
+- `getBars()` 를 SEED 우선 → DB 폴백으로 (SEED 는 표와 같은 실행에서 나온 전 종목 차트)
+- DB payload 가 SEED 보다 낡으면(`generated_at` 비교) 무시
+- `scripts/build_db_payload.py` 추가 — 화면이 참조하는 필드만 남겨 256KiB 한도에 맞춘다
+  (전체 payload 268KB > 한도 262KB 였다. 87%로 축소)
+- §7 에 갱신 5단계 절차 명시
+
 ---
 
 ## 9. 위반 목록 (최종 갱신 2026-09-06)
@@ -462,3 +483,19 @@ LG씨엔에스         039490           키움증권
 ```
 python3 tests/test_screener.py     # V-3 / V-4 / V-7 / V-8 / V-9 / R-2 / R-4, 네트워크 불필요
 ```
+
+### 대시보드 갱신 절차 (순서대로, 하나라도 빠지면 화면이 낡는다)
+```
+python3 scripts/dashboard_refresh_kr.py   # 1. outputs/live/ 재생성 (네트워크)
+python3 scripts/embed_dashboard_seed.py   # 2. index.html 의 var SEED 주입
+python3 scripts/build_db_payload.py       # 3. DB용 슬림 payload 생성 (256KiB 한도)
+#                                            4. Artifact 재배포
+#                                            5. kr_screener_summary/latest 에 write_db
+```
+**4번만 하고 5번을 빼먹으면 화면이 옛 데이터로 되돌아간다.** 페이지는 SEED 로 먼저 그린 뒤
+Artifact 런타임에서 DB 문서를 읽어 payload 를 교체하기 때문이다(§8 R-5).
+현재는 DB 가 SEED 보다 낡으면 `generated_at` 비교로 무시하지만, 그건 안전망이지
+갱신을 건너뛰어도 된다는 뜻이 아니다 — 무시되면 실시간 갱신이 죽은 채로 도는 것이다.
+
+**검증은 로컬 서버가 아니라 배포된 Artifact 에서 하라.** 로컬(`file://`·`http://localhost`)
+에는 `window.claude` 가 없어 DB 경로가 통째로 실행되지 않는다. R-5 가 그래서 통과했다.

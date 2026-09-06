@@ -771,16 +771,24 @@
       db.doc("kr_screener_summary/latest").onSnapshot(function (snap) {
         if (!snap.exists) return;
         var data = snap.data();
-        if (data && data.payload) applySeed(data.payload);
+        if (!data || !data.payload) return;
+        // DB 가 SEED 보다 낡았으면 무시한다. 예전에는 무조건 덮어써서, 새 지표를 넣고
+        // 페이지를 다시 배포해도 낡은 DB 문서가 화면을 옛 데이터로 되돌려놨다
+        // (①②③④ 칸이 전부 '–' 로 뜬 원인). generated_at 은 ISO8601 UTC 라 사전순 = 시간순.
+        if (SEED.generated_at && data.payload.generated_at &&
+            data.payload.generated_at < SEED.generated_at) return;
+        applySeed(data.payload);
       }, function () { /* keep showing seed data on error */ });
     }).catch(function () {});
   }
 
   function getBars(code) {
-    if (!dbNs) {
-      var seedRow = (SEED.bars_by_code && SEED.bars_by_code[code]) || null;
-      return Promise.resolve(seedRow);
-    }
+    // SEED 를 우선한다. SEED 는 배포 시점의 전 종목 차트를 담고 있어 항상 이 페이지의
+    // 표 데이터와 같은 실행에서 나온 값이다. DB 는 갱신이 밀리면 낡은 봉을 주고,
+    // 새로 편입된 종목은 문서 자체가 없어 "불러올 수 없습니다"가 떴다.
+    var seedRow = (SEED.bars_by_code && SEED.bars_by_code[code]) || null;
+    if (seedRow) return Promise.resolve(seedRow);
+    if (!dbNs) return Promise.resolve(null);
     return dbNs.doc("kr_screener_bars/" + code).get().then(function (snap) {
       if (!snap.exists) throw new Error("no bars");
       return snap.data().bars;
