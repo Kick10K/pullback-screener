@@ -61,7 +61,21 @@ CONFIG = dict(
     # --- universe ---
     MCAP_MIN_EOK = 15_000,          # 시가총액 하한, 억원 단위. 15,000억 = 1.5조원.
     MIN_LISTING_DAYS = 60,          # 상장일로부터 최소 경과 영업일. 이보다 짧으면 제외.
-    MIN_AVG_TRADING_VALUE_EOK = 5,  # 20일 평균 거래대금(억원) 하한. 대형주 위주라 느슨한 기본값.
+    MIN_AVG_TRADING_VALUE_EOK = 10, # 20일 평균 거래대금(억원) 하한. 대형주 위주라 느슨한 기본값.
+                                     # 올리면 유동성 낮은 종목이 빠지고, 내리면 호가가 얕은 종목이 섞인다.
+    EXCLUDE_PREFERRED_BY_CODE = True,  # 종목코드 끝자리가 0이 아니면 우선주로 본다(§3-1).
+                                     # 이름 패턴('우','우B')만으로는 '한화3우B' 같은 변형을 놓친다.
+                                     # 끄면 우선주가 유니버스에 섞여 같은 기업이 중복 신호를 낸다.
+    EXCLUDE_TICKERS_FILE = "config/exclude_tickers.txt",  # 관리종목/거래정지를 직접 적어 두는 목록(§5 2단계).
+                                     # 한 줄에 종목코드 하나. KRX가 안정적인 공개 API를 주지 않아 수동 보완이 필요하다.
+
+    # --- 관리종목/거래정지/이상급등 휴리스틱 (§5 3단계) ---
+    HALT_LOOKBACK_DAYS = 10,        # 최근 N 거래일 안에
+    HALT_ZERO_VALUE_DAYS = 1,       # 거래대금 0원인 날이 이 일수 이상이면 거래정지로 간주해 제외.
+                                     # 올리면 짧은 정지를 놓치고, 내리면 거래가 한산한 날 하루에도 탈락한다.
+    EXTREME_MOVE_LOOKBACK = 20,     # 최근 N 거래일 안에
+    EXTREME_MOVE_THRESHOLD = 0.25,  # 단일 종가 변동이 ±이 값 이상이면 이상급등/투자경고로 보고 제외.
+                                     # 0으로 두면 이 필터가 꺼진다. 내리면 정상 급등주까지 잘려 나간다.
     EXCLUDE_NAME_RE = re.compile(   # 우선주/스팩/리츠 이름 패턴 (종목코드로 우선주를 구분하는 방법도 있으나
         r"(우[A-Z]?B?$|스팩\d*호?$|리츠$)"     # 이름 규칙이 더 안정적이라 이름 기준으로 제외.
     ),                                   # 주의: "리츠"는 끝 앵커($) 필수 -- 안 그러면 "메리츠금융지주"처럼
@@ -75,9 +89,19 @@ CONFIG = dict(
 
     # --- trend filter (정배열) ---
     MA_PERIODS = (5, 20, 60, 120),  # 정배열 판정에 쓰는 이동평균 기간.
-    MA60_SLOPE_LOOKBACK = 5,        # 60일선 기울기를 며칠 전 대비로 잴지. 5일 전보다 높으면 상승.
-    DISPARITY_MA = 20,              # 이격도 = 종가 / 이 기간 이평선. 스펙에 기준선이 명시되지 않아 20일선으로 가정.
-    DISPARITY_MAX = 1.15,           # 이격도가 이 값을 넘으면(20일선 대비 +15% 초과) 과열로 보고 제외.
+    MA60_SLOPE_LOOKBACK = 20,       # 60일선 기울기를 며칠 전 대비로 잴지. 5일 전 대비는 노이즈에 가까워
+                                     # 20일로 둔다(§3-2). 내리면 횡보 구간이 '상승'으로 잡힌다.
+    MA5_ALIGN_TOLERANCE = 0.97,     # MA5 > MA20 * 이 값. 되돌림 중에는 MA5가 MA20 아래로 잠깐 내려가는 게
+                                     # 정상이라 이 조건에만 완화를 허용한다(§3-2). 1.0으로 올리면 눌림이
+                                     # 깊은 종목이 추세 단계에서 먼저 탈락해 되돌림 조건에 도달하지 못한다.
+    DISPARITY_MA = 20,              # 이격도 = 종가 / 이 기간 이평선. 점수 계산의 기준선.
+    # 이격도 밴드. 상한은 과열, 하한은 추세 훼손을 잘라낸다. 장기선일수록 폭이 넓어야 한다.
+    DISPARITY_MAX_MA20 = 1.12,      # 종가가 20일선보다 12% 넘게 높으면 과열 -> 제외.
+    DISPARITY_MAX_MA60 = 1.35,      # 60일선 대비 상한.
+    DISPARITY_MAX_MA120 = 1.75,     # 120일선 대비 상한. 올리면 급등 후 눌림도 통과한다.
+    DISPARITY_MIN_MA20 = 0.92,      # 종가가 20일선보다 8% 넘게 낮으면 되돌림이 아니라 추세 훼손 -> 제외.
+    DISPARITY_MIN_MA60 = 0.98,      # 종가는 60일선 근처 이상은 유지해야 한다.
+                                     # 하한을 내리면(=끄면) 20일선을 크게 이탈한 종목이 되돌림으로 잡힌다.
 
     # --- retracement (되돌림), 종가 기준 ---
     HIGH_LOOKBACK = 20,             # ② 고점 탐색 창. 당일을 제외한 최근 N일 종가에서 H를 잡는다.
@@ -91,6 +115,9 @@ CONFIG = dict(
     RETRACE_MIN = 0.20,             # 통과 하한. (H-종가)/(H-L_leg) 이 값 미만이면 눌림이 너무 얕음 -> 제외.
     RETRACE_MAX = 0.70,             # 통과 상한. 이 값 초과면 추세 훼손 수준의 눌림 -> 제외.
                                      # 비율 자체는 필터로 잘라도 결과 테이블 컬럼에는 항상 남긴다.
+    DD_FROM_HIGH_MAX = 0.18,        # 고점 대비 낙폭 상한(§3-3). 되돌림비율은 상대값이라 같은 0.4대에서도
+                                     # 실제 낙폭이 3~17%로 벌어진다. 절대 낙폭의 꼬리를 자르는 안전장치다.
+                                     # 올리면 추세 전환급 하락이 되돌림으로 섞이고, 내리면 깊은 눌림이 잘린다.
 
     # --- 시계열 구조 조건 (INV-7): ① L_leg -> ② H -> ③ L_pull -> ④ 오늘 ---
     RANGE_PCT_MIN = 0.05,           # 상승 다리 (H-L_leg)/L_leg 하한. 이 아래면 '눌림'이 아니라 횡보의
@@ -123,11 +150,28 @@ CONFIG = dict(
     HISTORY_YEARS = 3,              # 최초 캐시 적재 시 받아올 연수.
     SPARKLINE_DAYS = 60,            # HTML 리포트 스파크라인에 쓸 최근 거래일 수.
 
-    # --- scoring weights (각 0~1로 정규화한 값에 곱함, 합이 1일 필요는 없음) ---
-    WEIGHT_VALUE_GROWTH = 0.30,     # 거래대금 증가율 (최근 5일 평균 / 그 이전 20일 평균)
-    WEIGHT_VOLUME_DRYUP = 0.25,     # 눌림 구간 거래량이 직전 상승 구간보다 줄었는지 (건강한 눌림)
-    WEIGHT_MA_DISTANCE = 0.25,      # 20일선까지의 거리가 가까울수록 높은 점수
-    WEIGHT_FRESHNESS = 0.20,        # 고점 갱신 후 경과일이 짧을수록 높은 점수
+    # --- scoring: 6개 항목을 0~1로 정규화해 가중합한 뒤 100점 만점으로 환산 ---
+    # 가중치를 0으로 두면 그 항목은 점수에서 빠진다.
+    WEIGHT_VALUE_SURGE = 20.0,      # 고점 직전 상승구간 거래대금 / 60일 평균 (수급 유입)
+    WEIGHT_VOLUME_DRYUP = 25.0,     # 눌림 구간 거래량 / 상승 구간 거래량 (낮을수록 건전한 눌림)
+    WEIGHT_MA20_PROXIMITY = 20.0,   # 20일선에 얼마나 붙어 있는가
+    WEIGHT_FRESHNESS = 10.0,        # 고점 갱신 후 경과일이 이상 구간(3~8일)인가
+    WEIGHT_RETRACE_QUALITY = 15.0,  # 되돌림비율이 피보나치 0.45 부근인가
+    WEIGHT_TREND_STRENGTH = 10.0,   # 60일선 기울기 + 120일 상대수익률
+
+    ADVANCE_VOL_DAYS = 5,           # 상승 구간 거래량/거래대금을 고점 직전 며칠로 볼지(§4).
+                                     # 20일로 넓게 잡으면 되돌림 이전 구간이 섞여 상승 구간이 희석된다.
+    VALUE_SURGE_LOOKBACK = 60,      # value_surge 의 비교 기준이 되는 평균 거래대금 기간.
+    VALUE_SURGE_FULL = 2.0,         # 평소의 이 배수 이상이면 만점.
+    VOLUME_DRYUP_FULL = 0.55,       # 되돌림 거래량이 상승구간의 이 비율 이하면 만점(=45% 이상 감소).
+    VOLUME_DRYUP_ZERO = 1.30,       # 오히려 30% 늘었으면 0점.
+    MA20_PROXIMITY_FULL = 0.015,    # 20일선과 1.5% 이내면 만점.
+    MA20_PROXIMITY_ZERO = 0.10,     # 10% 벗어나면 0점.
+    RETRACE_IDEAL = 0.45,           # 되돌림비율이 이 값이면 만점.
+    RETRACE_SIGMA = 0.18,           # 가우시안 폭. 좁히면 특정 비율에만 점수가 쏠린다.
+    TREND_SLOPE_FULL = 0.08,        # 60일선이 20일 동안 8% 오르면 만점.
+    TREND_RETURN_LOOKBACK = 120,    # 상대수익률 기간.
+    TREND_RETURN_FULL = 0.40,       # 120일 수익률 40%면 만점.
 )
 
 TARGET_MCAP_MIN_WON = CONFIG["MCAP_MIN_EOK"] * 1e8
@@ -164,6 +208,38 @@ def is_excluded_name(name: str) -> bool:
                 return True
 
     return bool(re.search(r"\b(ETN|ELW)\b", upper))
+
+
+def is_preferred_code(code: str) -> bool:
+    """종목코드 끝자리로 우선주를 판별한다 (§3-1).
+
+    보통주는 끝자리가 0이다. 이름 패턴('우', '우B')만 보면 '한화3우B' 같은 변형이나
+    이름이 특이한 우선주를 놓친다. 이름 규칙과 함께 쓴다.
+    """
+    if not CONFIG["EXCLUDE_PREFERRED_BY_CODE"]:
+        return False
+    c = str(code).strip().zfill(6)
+    return len(c) == 6 and c[-1] != "0"
+
+
+def load_manual_excludes() -> set[str]:
+    """§5 2단계 — 사용자가 직접 관리하는 제외 목록. 없으면 주석만 있는 빈 파일을 만든다."""
+    path = ROOT / CONFIG["EXCLUDE_TICKERS_FILE"]
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# 관리종목/거래정지/투자경고 등 직접 제외할 종목코드를 한 줄에 하나씩 적는다.\n"
+            "# KRX가 이 목록을 안정적인 공개 API로 주지 않아 수동 보완이 필요하다 (SCREENER_SPEC.md §5).\n"
+            "# 예)\n# 900110\n",
+            encoding="utf-8",
+        )
+        return set()
+    out = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#")[0].strip()
+        if line:
+            out.add(line.zfill(6))
+    return out
 
 
 def fetch_kind_listing(market_type: str) -> pd.DataFrame:
@@ -212,57 +288,90 @@ def sector_of(industry: str | float) -> str:
     return "기타"
 
 
-def fetch_mcap_ranked(sosok: int, mcap_floor_eok: float) -> pd.DataFrame:
-    """sosok: 0=KOSPI, 1=KOSDAQ. Pages are pre-sorted by market cap desc;
-    stop once a page's max cap drops below the floor."""
-    rows = []
-    page = 1
+def fetch_mcap_ranked(market: str, mcap_floor_eok: float) -> pd.DataFrame:
+    """시가총액 순위를 네이버 모바일 JSON API에서 받는다. market: 'KOSPI' | 'KOSDAQ'.
+
+    예전에는 PC 웹의 시세 테이블을 HTML 파싱했는데, 코드는 정규식으로 이름·시총은 표에서
+    따로 뽑아 **위치로** 짝지었다. 그 방식은 한 행만 어긋나도 뒤 전체가 밀렸다(§8 R-3).
+    이 API는 한 레코드가 코드·이름·시총을 함께 주므로 어긋남이 구조적으로 불가능하다.
+    (2026-10 네이버 금융 개편으로 기존 `class="tltle"` 테이블 자체가 사라졌다.)
+
+    `stockEndType`/`tradeStopType`/`tradableStatusCode` 도 함께 와서 §5 1단계
+    (데이터 소스가 주는 거래정지 정보)를 여기서 처리한다.
+    """
+    rows, page = [], 1
     while True:
-        url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-        html = http_get_text(url, "euc-kr")
-        # 종목코드는 더 이상 숫자 6자리가 아니다. KRX가 '0167A0' 같은 영숫자 코드를 발급한다.
-        # 숫자만 매칭하면 그런 행을 건너뛰고, 표와 위치로 짝지을 때 그 뒤 전체가 한 칸씩 밀린다.
-        # 이름까지 같은 정규식으로 함께 뽑아 아래에서 위치 짝짓기를 '검증'한다.
-        pairs = re.findall(r'code=([0-9A-Z]{6})"[^>]*class="tltle">([^<]+)</a>', html)
-        if not pairs:
+        url = (f"https://m.stock.naver.com/api/stocks/marketValue/{market}"
+               f"?page={page}&pageSize=100")
+        payload = json.loads(http_get(url).decode("utf-8"))
+        stocks = payload.get("stocks") or []
+        if not stocks:
             break
-        tables = pd.read_html(io.StringIO(html))
-        t = tables[1].dropna(subset=["종목명"]).reset_index(drop=True)
-        # 예전에는 min()으로 길이만 맞춰 잘라내서 어긋남이 조용히 통과했다.
-        # 그 결과 13종목이 이웃 종목의 이름·시가총액을 달고 있었다(§8 R-3). 이제는 즉시 실패시킨다.
-        names = [n for _, n in pairs]
-        if len(names) != len(t) or names != t["종목명"].tolist():
-            first = next((i for i in range(min(len(names), len(t))) if names[i] != t["종목명"].iloc[i]), None)
-            raise RuntimeError(
-                f"시총 순위 페이지 파싱 정렬 실패 (sosok={sosok}, page={page}): "
-                f"링크 {len(names)}건 vs 표 {len(t)}행"
-                + (f", 첫 불일치 idx={first} '{names[first]}' != '{t['종목명'].iloc[first]}'" if first is not None else "")
-            )
-        t = t.copy()
-        t["code"] = [c for c, _ in pairs]
-        rows.append(t[["code", "종목명", "시가총액", "상장주식수"]])
-        page_min_cap = t["시가총액"].min()
-        if page_min_cap < mcap_floor_eok or len(t) < 50:
+        page_min_cap = None
+        for st in stocks:
+            raw_cap = st.get("marketValueRaw")
+            cap_eok = float(raw_cap) / 1e8 if raw_cap not in (None, "") else float("nan")
+            if page_min_cap is None or (cap_eok == cap_eok and cap_eok < page_min_cap):
+                page_min_cap = cap_eok
+            # 일반 주식만. ETF/ETN/ELW 는 stockEndType 으로 소스가 직접 구분해 준다.
+            if st.get("stockEndType") != "stock":
+                continue
+            stop = (st.get("tradeStopType") or {})
+            raw_val = st.get("accumulatedTradingValueRaw")
+            rows.append({
+                "code": str(st.get("itemCode", "")).zfill(6),
+                "name": (st.get("stockName") or "").strip(),
+                "mcap_eok": cap_eok,
+                "trading_value_won": float(raw_val) if raw_val not in (None, "") else float("nan"),
+                "market": market,
+                # §5 1단계: 소스가 주는 거래 상태. TRADING / ok 가 아니면 정상 거래가 아니다.
+                "source_halted": (stop.get("name") not in (None, "TRADING"))
+                                 or (st.get("tradableStatusCode") not in (None, "ok")),
+            })
+        if page_min_cap is not None and page_min_cap < mcap_floor_eok:
+            break
+        if len(stocks) < 100:
             break
         page += 1
         time.sleep(0.15)
-    out = pd.concat(rows, ignore_index=True)
-    out.columns = ["code", "name", "mcap_eok", "shares_out"]
+    if not rows:
+        raise RuntimeError(
+            f"{market} 시총 순위를 한 건도 받지 못했다 — 네이버 API 응답 형식이 바뀌었는지 확인할 것"
+        )
+    out = pd.DataFrame(rows)
     out = out[out["mcap_eok"] >= mcap_floor_eok].reset_index(drop=True)
-    out["market"] = "KOSPI" if sosok == 0 else "KOSDAQ"
     return out
 
 
 def build_universe() -> tuple[pd.DataFrame, dict]:
     report = {}
-    kospi_cap = fetch_mcap_ranked(0, CONFIG["MCAP_MIN_EOK"])
-    kosdaq_cap = fetch_mcap_ranked(1, CONFIG["MCAP_MIN_EOK"])
+    kospi_cap = fetch_mcap_ranked("KOSPI", CONFIG["MCAP_MIN_EOK"])
+    kosdaq_cap = fetch_mcap_ranked("KOSDAQ", CONFIG["MCAP_MIN_EOK"])
     cap_df = pd.concat([kospi_cap, kosdaq_cap], ignore_index=True)
     report["mcap_floor_pass"] = len(cap_df)
+
+    # §5 1단계: 소스가 거래정지/관리 상태를 알려주면 그대로 쓴다 (휴리스틱보다 우선).
+    src_halted = cap_df[cap_df["source_halted"]]
+    cap_df = cap_df[~cap_df["source_halted"]].reset_index(drop=True)
+    report["excluded_source_halted"] = src_halted["name"].tolist()
 
     name_excluded = cap_df[cap_df["name"].apply(is_excluded_name)]
     cap_df = cap_df[~cap_df["code"].isin(name_excluded["code"])].reset_index(drop=True)
     report["excluded_by_name_pattern"] = name_excluded["name"].tolist()
+
+    # §3-1: 종목코드 끝자리로도 우선주를 건다. 이름 규칙이 놓치는 변형을 잡는다.
+    code_pref = cap_df[cap_df["code"].apply(is_preferred_code)]
+    cap_df = cap_df[~cap_df["code"].isin(code_pref["code"])].reset_index(drop=True)
+    report["excluded_preferred_by_code"] = code_pref["name"].tolist()
+
+    # §5 2단계: 수동 제외 목록
+    manual = load_manual_excludes()
+    if manual:
+        hit = cap_df[cap_df["code"].isin(manual)]
+        cap_df = cap_df[~cap_df["code"].isin(manual)].reset_index(drop=True)
+        report["excluded_manual"] = hit["name"].tolist()
+    else:
+        report["excluded_manual"] = []
 
     kospi_list = fetch_kind_listing("stockMkt")
     kosdaq_list = fetch_kind_listing("kosdaqMkt")
@@ -325,12 +434,32 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     for p in CONFIG["MA_PERIODS"]:
         x[f"ma{p}"] = x["close"].rolling(p).mean()
     slope_lb = CONFIG["MA60_SLOPE_LOOKBACK"]
-    x["ma60_slope_up"] = x["ma60"] > x["ma60"].shift(slope_lb)
+    x["ma60_slope"] = x["ma60"] / x["ma60"].shift(slope_lb) - 1.0
+    x["ma60_slope_up"] = x["ma60_slope"] > 0
     dma = CONFIG["DISPARITY_MA"]
     x["disparity"] = x["close"] / x[f"ma{dma}"]
     p5, p20, p60, p120 = CONFIG["MA_PERIODS"]
-    x["is_stacked"] = (x[f"ma{p5}"] > x[f"ma{p20}"]) & (x[f"ma{p20}"] > x[f"ma{p60}"]) & (x[f"ma{p60}"] > x[f"ma{p120}"])
-    x["is_uptrend"] = x["is_stacked"] & x["ma60_slope_up"] & (x["disparity"] <= CONFIG["DISPARITY_MAX"])
+    for pnum in CONFIG["MA_PERIODS"]:
+        x[f"disp{pnum}"] = x["close"] / x[f"ma{pnum}"]
+
+    # 정배열. MA5 vs MA20 에만 완화 계수를 둔다 — 되돌림 중 MA5가 MA20 아래로 잠깐
+    # 내려가는 것은 정상이고, 여기서 자르면 눌림이 깊은 종목이 되돌림 조건에 닿지 못한다(§3-2).
+    tol = CONFIG["MA5_ALIGN_TOLERANCE"]
+    x["is_stacked"] = ((x[f"ma{p5}"] > x[f"ma{p20}"] * tol)
+                       & (x[f"ma{p20}"] > x[f"ma{p60}"])
+                       & (x[f"ma{p60}"] > x[f"ma{p120}"]))
+
+    # 이격도 밴드: 상한(과열) + 하한(추세 훼손). 장기선일수록 폭이 넓다.
+    disp_ok = (
+        (x["disp20"] <= CONFIG["DISPARITY_MAX_MA20"]) & (x["disp20"] >= CONFIG["DISPARITY_MIN_MA20"])
+        & (x["disp60"] <= CONFIG["DISPARITY_MAX_MA60"]) & (x["disp60"] >= CONFIG["DISPARITY_MIN_MA60"])
+        & (x["disp120"] <= CONFIG["DISPARITY_MAX_MA120"])
+    )
+    x["disparity_ok"] = disp_ok
+    x["is_uptrend"] = x["is_stacked"] & x["ma60_slope_up"] & disp_ok
+
+    # 장기 상대수익률 (추세 강도 점수용)
+    x["long_return"] = x["close"] / x["close"].shift(CONFIG["TREND_RETURN_LOOKBACK"]) - 1.0
 
     w = CONFIG["HIGH_LOOKBACK"]
     prior_close = x["close"].shift(1)
@@ -382,7 +511,45 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     nl = CONFIG["NOT_LOWEST_IN_DAYS"]
     x["is_lowest_recent"] = x["close"] <= x["close"].rolling(nl).min()
 
+    # 거래대금은 종가 x 거래량 근사다(§6: 근사를 쓰면 명시할 것). 컬럼명에 근사임을 남긴다.
     x["trading_value_eok"] = x["close"] * x["volume"] / 1e8
+
+    # --- 관리종목/거래정지/이상급등 휴리스틱 (§5 3단계) ---
+    # 거래대금 0원인 날이 최근 N일 안에 있으면 거래정지로 간주한다.
+    zero_days = (x["trading_value_eok"].fillna(0) <= 0).rolling(
+        CONFIG["HALT_LOOKBACK_DAYS"], min_periods=1).sum()
+    x["halted"] = zero_days >= CONFIG["HALT_ZERO_VALUE_DAYS"]
+    thr = CONFIG["EXTREME_MOVE_THRESHOLD"]
+    if thr and thr > 0:
+        x["extreme_move"] = (x["close"].pct_change().abs() >= thr).rolling(
+            CONFIG["EXTREME_MOVE_LOOKBACK"], min_periods=1).max().astype(bool)
+    else:
+        x["extreme_move"] = False
+
+    # --- value_surge: 고점 직전 상승구간 거래대금 / 60일 평균 (수급 유입) ---
+    # 상승 구간을 고점 직전 ADVANCE_VOL_DAYS 로 좁게 잡는다. 20일로 넓히면 되돌림 이전
+    # 구간까지 섞여 상승 구간이 희석된다(§4).
+    avg_value_long = x["trading_value_eok"].rolling(
+        CONFIG["VALUE_SURGE_LOOKBACK"], min_periods=20).mean()
+    val_arr = x["trading_value_eok"].to_numpy(dtype=float)
+    vol_arr = x["volume"].to_numpy(dtype=float)
+    adv_days = CONFIG["ADVANCE_VOL_DAYS"]
+    rally_value = np.full(len(x), np.nan)
+    rally_volume = np.full(len(x), np.nan)
+    pull_volume = np.full(len(x), np.nan)
+    for j in range(w + 1, n):
+        if np.isnan(days_since_high[j]):
+            continue
+        hj = j - int(days_since_high[j])              # ② 고점 인덱스
+        rs = max(0, hj - (adv_days - 1))
+        rally_value[j] = np.nanmean(val_arr[rs:hj + 1])      # 상승 구간 거래대금
+        rally_volume[j] = np.nanmean(vol_arr[rs:hj + 1])     # 상승 구간 거래량
+        if hj + 1 <= j:
+            pull_volume[j] = np.nanmean(vol_arr[hj + 1:j + 1])  # 눌림 구간 거래량
+    x["rally_value_eok"] = rally_value
+    with np.errstate(invalid="ignore", divide="ignore"):
+        x["value_surge"] = rally_value / avg_value_long.to_numpy(dtype=float)
+        x["vol_dryup_ratio"] = pull_volume / rally_volume
 
     ema12 = x["close"].ewm(span=12, adjust=False).mean()
     ema26 = x["close"].ewm(span=26, adjust=False).mean()
@@ -390,7 +557,10 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     x["macd_signal"] = x["macd"].ewm(span=9, adjust=False).mean()
     x["macd_hist"] = x["macd"] - x["macd_signal"]
 
-    return x
+    # INV-1: 신호 계산은 종가 전용이다. 장중 고가/저가를 '쓰지 않는다'를 주석이 아니라
+    # 구조로 강제한다 — 여기서 떨어뜨리면 하류 코드가 접근할 방법 자체가 없어진다.
+    # 캔들 차트처럼 OHLC 가 필요한 표시 계층은 compute_features() 이전의 원본을 쓴다.
+    return x.drop(columns=[c for c in ("high", "low") if c in x.columns])
 
 
 def detect_price_discontinuity(df: pd.DataFrame) -> list[tuple[str, float]]:
@@ -475,52 +645,80 @@ def structure_points(x: pd.DataFrame, j: int) -> dict:
     )
 
 
+def _lin(value: float, full: float, zero: float) -> float:
+    """value 가 full 이면 1점, zero 면 0점인 선형 점수. full>zero / full<zero 둘 다 지원."""
+    if pd.isna(value):
+        return float("nan")
+    if full == zero:
+        return 1.0
+    return float(np.clip((zero - value) / (zero - full), 0.0, 1.0))
+
+
 def score_row(x: pd.DataFrame, j: int) -> dict:
-    """Score components for row j; each raw metric plus a 0..1 normalized
-    version relative to the trailing 120 sessions of this same stock (so the
-    score is comparable across very different price/volume scales)."""
-    def pct_rank(series: pd.Series, value: float) -> float:
-        s = series.dropna()
-        if len(s) < 10 or pd.isna(value):
-            return 0.5
-        return float((s < value).mean())
+    """6개 항목을 0~1로 정규화해 가중합한 뒤 100점 만점으로 환산한다(§4).
 
-    hist = x.iloc[max(0, j - 120):j]
+    각 항목의 기준값은 전부 CONFIG 에 있다(INV-5). 결측은 0점으로 두되, 원시 지표는
+    별도 컬럼으로 함께 돌려줘 왜 그 점수가 나왔는지 역추적할 수 있게 한다.
+    """
+    row = x.iloc[j]
+    comp: dict[str, float] = {}
 
-    val = x["trading_value_eok"]
-    recent5 = val.iloc[j - 4:j + 1].mean()
-    prior20 = val.iloc[j - 24:j - 4].mean()
-    value_growth = (recent5 / prior20 - 1) if prior20 and prior20 > 0 else 0.0
-    value_growth_n = pct_rank(hist["trading_value_eok"].pct_change(5), value_growth)
+    # 1) 거래대금 증가율 — 고점 직전 상승구간 / 60일 평균
+    value_surge = row.get("value_surge", np.nan)
+    comp["value_surge"] = 0.0 if pd.isna(value_surge) else float(
+        np.clip(value_surge / CONFIG["VALUE_SURGE_FULL"], 0, 1))
 
-    peak_i = j - int(x["days_since_high20"].iloc[j]) if not pd.isna(x["days_since_high20"].iloc[j]) else None
-    if peak_i is not None and peak_i < j:
-        pullback_vol = x["volume"].iloc[peak_i + 1:j + 1].mean()
-        pre_window = x["volume"].iloc[max(0, peak_i - 20):peak_i + 1]
-        advance_vol = pre_window.mean() if len(pre_window) else np.nan
-        vol_dryup_ratio = (pullback_vol / advance_vol) if advance_vol and advance_vol > 0 else np.nan
-    else:
-        vol_dryup_ratio = np.nan
-    vol_dryup_n = 0.5 if pd.isna(vol_dryup_ratio) else float(np.clip(1 - vol_dryup_ratio, 0, 1))
+    # 2) 눌림 구간 거래량 감소 — 낮을수록 건전
+    dry = row.get("vol_dryup_ratio", np.nan)
+    comp["volume_dryup"] = _lin(dry, CONFIG["VOLUME_DRYUP_FULL"], CONFIG["VOLUME_DRYUP_ZERO"])
 
-    disparity = x["disparity"].iloc[j]
-    ma_distance = abs(disparity - 1.0) if not pd.isna(disparity) else np.nan
-    ma_distance_n = 0.5 if pd.isna(ma_distance) else float(np.clip(1 - ma_distance / 0.15, 0, 1))
+    # 3) 20일선 근접도
+    disp = row.get("disparity", np.nan)
+    dist = abs(disp - 1.0) if not pd.isna(disp) else np.nan
+    comp["ma20_proximity"] = _lin(dist, CONFIG["MA20_PROXIMITY_FULL"], CONFIG["MA20_PROXIMITY_ZERO"])
 
-    freshness = x["days_since_high20"].iloc[j]
-    freshness_n = 0.5 if pd.isna(freshness) else freshness_score(float(freshness))
+    # 4) 고점 후 경과일 — 고원형(§4에서 확정된 형태, freshness_score 가 단일 출처)
+    fresh = row.get("days_since_high20", np.nan)
+    comp["freshness"] = 0.5 if pd.isna(fresh) else freshness_score(float(fresh))
 
-    score = (
-        CONFIG["WEIGHT_VALUE_GROWTH"] * value_growth_n
-        + CONFIG["WEIGHT_VOLUME_DRYUP"] * vol_dryup_n
-        + CONFIG["WEIGHT_MA_DISTANCE"] * ma_distance_n
-        + CONFIG["WEIGHT_FRESHNESS"] * freshness_n
-    )
+    # 5) 되돌림비율 품질 — 피보나치 0.45 부근이면 만점, 가우시안 감점
+    rr = row.get("retrace_ratio", np.nan)
+    comp["retrace_quality"] = 0.0 if pd.isna(rr) else float(
+        np.exp(-0.5 * ((rr - CONFIG["RETRACE_IDEAL"]) / CONFIG["RETRACE_SIGMA"]) ** 2))
+
+    # 6) 추세 강도 — 60일선 기울기 + 120일 상대수익률
+    slope = row.get("ma60_slope", np.nan)
+    lret = row.get("long_return", np.nan)
+    a = 0.0 if pd.isna(slope) else float(np.clip(slope / CONFIG["TREND_SLOPE_FULL"], 0, 1))
+    b = 0.0 if pd.isna(lret) else float(np.clip(lret / CONFIG["TREND_RETURN_FULL"], 0, 1))
+    comp["trend_strength"] = 0.5 * a + 0.5 * b
+
+    weights = {
+        "value_surge": CONFIG["WEIGHT_VALUE_SURGE"],
+        "volume_dryup": CONFIG["WEIGHT_VOLUME_DRYUP"],
+        "ma20_proximity": CONFIG["WEIGHT_MA20_PROXIMITY"],
+        "freshness": CONFIG["WEIGHT_FRESHNESS"],
+        "retrace_quality": CONFIG["WEIGHT_RETRACE_QUALITY"],
+        "trend_strength": CONFIG["WEIGHT_TREND_STRENGTH"],
+    }
+    total_w = sum(weights.values())
+    acc = 0.0
+    parts = {}
+    for key, wgt in weights.items():
+        v = comp[key]
+        v = 0.0 if (v is None or pd.isna(v)) else float(v)
+        parts[f"s_{key}"] = round(v * 100, 1)
+        acc += wgt * v
+
+    peak_i = j - int(row["days_since_high20"]) if not pd.isna(row["days_since_high20"]) else None
     return dict(
-        score=round(float(score) * 100, 1),
-        value_growth_pct=round(float(value_growth) * 100, 1),
-        vol_dryup_ratio=None if pd.isna(vol_dryup_ratio) else round(float(vol_dryup_ratio), 2),
+        score=round(acc / total_w * 100, 2),
+        value_surge=None if pd.isna(value_surge) else round(float(value_surge), 2),
+        vol_dryup_ratio=None if pd.isna(dry) else round(float(dry), 2),
+        long_return_pct=None if pd.isna(lret) else round(float(lret) * 100, 1),
+        ma60_slope_pct=None if pd.isna(slope) else round(float(slope) * 100, 2),
         peak_date=x.index[peak_i].strftime("%Y-%m-%d") if peak_i is not None else None,
+        **parts,
     )
 
 
@@ -547,6 +745,34 @@ def structure_verdict(row: pd.Series) -> dict:
     return dict(ok=not reasons, reasons=reasons)
 
 
+def screen_funnel(rows: list[dict]) -> dict[str, int]:
+    """되돌림 단계 필터를 순서대로 얹으며 각 단계 잔존 수를 센다 (§3).
+
+    어느 조건이 몇 종목을 잘랐는지 보이지 않으면 튜닝이 불가능하다. 콘솔·CSV·HTML 이
+    전부 이 함수를 써서 같은 숫자를 쓴다.
+    """
+    C = CONFIG
+    stages = [
+        (f"고점경과일 {C['DAYS_SINCE_HIGH_MIN']}~{C['DAYS_SINCE_HIGH_MAX']}일",
+         lambda r: r["passes_days_since_high"]),
+        (f"되돌림비율 {C['RETRACE_MIN']}~{C['RETRACE_MAX']}",
+         lambda r: r["passes_retrace_band"]),
+        (f"고점 대비 낙폭 {C['DD_FROM_HIGH_MAX'] * 100:.0f}% 이내",
+         lambda r: r["passes_dd_from_high"]),
+        (f"상승 다리 {C['RANGE_PCT_MIN'] * 100:.0f}% 이상",
+         lambda r: (r["range_pct"] is not None) and r["range_pct"] >= C["RANGE_PCT_MIN"]),
+        ("오늘이 눌림 바닥 아님",
+         lambda r: (r["days_since_pullback_low"] is not None)
+         and r["days_since_pullback_low"] >= C["PULLBACK_LOW_MIN_AGE"]),
+        (f"최근 {C['NOT_LOWEST_IN_DAYS']}일 최저 종가 아님", lambda r: r["passes_structure"]),
+    ]
+    out, cur = {}, list(rows)
+    for label, keep in stages:
+        cur = [r for r in cur if keep(r)]
+        out[label] = len(cur)
+    return out
+
+
 def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict | None:
     if date not in feat.index:
         return None
@@ -556,6 +782,9 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
         return None
     avg_val20 = feat["trading_value_eok"].iloc[max(0, j - 19):j + 1].mean()
     if avg_val20 < CONFIG["MIN_AVG_TRADING_VALUE_EOK"]:
+        return None
+    # §5 3단계 휴리스틱. 유니버스 단계의 조건이므로 행 자체를 떨어뜨린다(정배열·유동성과 동일).
+    if bool(row.get("halted", False)) or bool(row.get("extreme_move", False)):
         return None
     passes_band = CONFIG["RETRACE_MIN"] <= row["retrace_ratio"] <= CONFIG["RETRACE_MAX"]
 
@@ -568,7 +797,15 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
     )
     struct = structure_verdict(row)  # INV-7: ①→②→③→④ 순서 확인
 
+    # §3-3: 고점 대비 낙폭 상한. 되돌림비율은 상대값이라 같은 0.4대에서도 실제 낙폭이
+    # 크게 벌어진다. 절대 낙폭이 이 선을 넘으면 되돌림이 아니라 추세 전환으로 본다.
+    dd = row["dd_from_high"]
+    passes_dd = (not pd.isna(dd)) and dd <= CONFIG["DD_FROM_HIGH_MAX"]
+
     reasons = []
+    if not passes_dd:
+        shown = "N/A" if pd.isna(dd) else f"{dd * 100:.1f}%"
+        reasons.append(f"고점 대비 낙폭 {shown} (상한 {CONFIG['DD_FROM_HIGH_MAX'] * 100:.0f}%)")
     if not passes_days:
         reasons.append(
             f"고점경과일 {dsh_int}일 (허용 {CONFIG['DAYS_SINCE_HIGH_MIN']}~{CONFIG['DAYS_SINCE_HIGH_MAX']}일)"
@@ -581,7 +818,8 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
 
     # 경과일 필터에 걸린 종목은 점수 계산에 도달하지 않는다(§4).
     sc = score_row(feat, j) if passes_days else dict(
-        score=None, value_growth_pct=None, vol_dryup_ratio=None, peak_date=peak_date_of(feat, j)
+        score=None, value_surge=None, vol_dryup_ratio=None, long_return_pct=None,
+        ma60_slope_pct=None, peak_date=peak_date_of(feat, j),
     )
 
     return dict(
@@ -594,7 +832,8 @@ def screen_on_date(feat: pd.DataFrame, date: pd.Timestamp, meta: dict) -> dict |
         passes_retrace_band=bool(passes_band),
         passes_days_since_high=bool(passes_days),
         passes_structure=bool(struct["ok"]),
-        is_candidate=bool(passes_band and passes_days and struct["ok"]),
+        passes_dd_from_high=bool(passes_dd),
+        is_candidate=bool(passes_band and passes_days and passes_dd and struct["ok"]),
         exclude_reason="; ".join(reasons) if reasons else "",
         ma5=float(row["ma5"]), ma20=float(row["ma20"]), ma60=float(row["ma60"]), ma120=float(row["ma120"]),
         disparity_vs_ma20=round(float(row["disparity"]), 3),
@@ -625,7 +864,13 @@ def sparkline_svg(closes: pd.Series, up: bool) -> str:
             f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.6"/></svg>')
 
 
-def build_html_report(results: list[dict], histories: dict, run_date: str, funnel: dict, n_uptrend_detected: int) -> str:
+def build_html_report(results: list[dict], histories: dict, run_date: str, funnel: dict,
+                      n_uptrend_detected: int, stage_funnel: dict | None = None) -> str:
+    # §9 8번: 되돌림 단계 필터의 잔존 수를 퍼널에 그대로 펼친다. 어느 조건이 병목인지
+    # 리포트만 보고도 알 수 있어야 한다.
+    stage_html = "".join(
+        f"<div>{label}<b>{n}</b></div>" for label, n in (stage_funnel or {}).items()
+    )
     rows_html = []
     for r in sorted(results, key=lambda d: -d["score"]):
         hist = histories[r["code"]]
@@ -664,14 +909,14 @@ td.l {{ text-align:left; }} .dim {{ color:#9096a6; font-size:11px; }}
 .note {{ margin-top:18px; font-size:12px; color:#5c6272; line-height:1.7; background:#fff; border:1px solid #dde0e8; border-radius:8px; padding:12px 14px; }}
 </style></head><body>
 <h1>KR 되돌림(눌림목) 스크리너 — {run_date}</h1>
-<div class="sub">정배열(5&gt;20&gt;60&gt;120) + 60일선 상승 + 이격도 {CONFIG['DISPARITY_MAX']} 이하 종목 중, 종가 기준 20일 되돌림비율을 계산한 결과. 통과 구간({CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']}) 충족 {pass_band}건 / 정배열+눌림 감지 전체 {n_uptrend_detected}건.</div>
+<div class="sub">정배열(5&gt;20&gt;60&gt;120) + 60일선 상승 + 이격도 {CONFIG['DISPARITY_MIN_MA20']}~{CONFIG['DISPARITY_MAX_MA20']} 종목 중, 종가 기준 20일 되돌림비율을 계산한 결과. 통과 구간({CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']}) 충족 {pass_band}건 / 정배열+눌림 감지 전체 {n_uptrend_detected}건.</div>
 <div class="funnel">
   <div>시총 {CONFIG['MCAP_MIN_EOK']:,}억 이상<b>{funnel.get('mcap_floor_pass','-')}</b></div>
   <div>우선주/스팩/리츠 제외 후<b>{funnel.get('mcap_floor_pass',0) - len(funnel.get('excluded_by_name_pattern',[]))}</b></div>
   <div>ETF 등 비상장법인 제외 후<b>{funnel.get('mcap_floor_pass',0) - len(funnel.get('excluded_by_name_pattern',[])) - len(funnel.get('excluded_not_a_company',[]))}</b></div>
   <div>상장 60일 미만 제외 후<b>{funnel.get('final_universe_size','-')}</b></div>
   <div>정배열+눌림 감지<b>{n_uptrend_detected}</b></div>
-  <div>되돌림비율 0.2~0.7 통과<b>{pass_band}</b></div>
+  {stage_html}
 </div>
 <table><thead><tr>
 <th class="l">종목</th><th>종가</th><th>시가총액</th><th>되돌림비율</th><th>이격도(20D)</th><th>이동평균</th><th>고점 후 경과</th><th>20일평균거래대금</th><th>점수</th><th>최근 {CONFIG['SPARKLINE_DAYS']}일</th>
@@ -797,14 +1042,10 @@ def main():
     final = [r for r in all_candidates if r["is_candidate"]]
     n_band = sum(1 for r in all_candidates if r["passes_retrace_band"])
     n_days_out = sum(1 for r in all_candidates if not r["passes_days_since_high"])
-    n_struct_out = sum(1 for r in all_candidates if not r["passes_structure"])
-    n_at_low = sum(1 for r in all_candidates if (r["days_since_pullback_low"] or 0) < CONFIG["PULLBACK_LOW_MIN_AGE"])
-    n_flat = sum(1 for r in all_candidates if (r["range_pct"] is None or r["range_pct"] < CONFIG["RANGE_PCT_MIN"]))
+    stage_funnel = screen_funnel(all_candidates)
     print(f"      정배열+눌림 감지: {len(all_candidates)}종목")
-    print(f"      되돌림비율 {CONFIG['RETRACE_MIN']}~{CONFIG['RETRACE_MAX']} 통과: {n_band}종목")
-    print(f"      고점경과일 {CONFIG['DAYS_SINCE_HIGH_MIN']}~{CONFIG['DAYS_SINCE_HIGH_MAX']}일 밖으로 탈락: {n_days_out}종목")
-    print(f"      시계열 구조(INV-7) 탈락: {n_struct_out}종목 "
-          f"(오늘이 바닥 {n_at_low} / 상승다리 {CONFIG['RANGE_PCT_MIN']*100:.0f}% 미만 {n_flat})")
+    for label, n in stage_funnel.items():
+        print(f"        {label}: {n}종목")
     print(f"      최종 후보: {len(final)}종목")
 
     date_str = run_date.strftime("%Y%m%d")
@@ -813,8 +1054,25 @@ def main():
     csv_rows = sorted(all_candidates, key=lambda d: (not d["is_candidate"], -(d["score"] or 0)))
     pd.DataFrame(csv_rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
+    # §9 8번: 단계별 퍼널을 산출물로도 남긴다. 콘솔 로그만으로는 어제와 비교할 수 없다.
+    funnel_rows = [{"단계": "시총 하한 통과", "잔존": funnel["mcap_floor_pass"]}]
+    funnel_rows += [
+        {"단계": "우선주/스팩/리츠 이름패턴 제외", "잔존": None, "제외": len(funnel["excluded_by_name_pattern"])},
+        {"단계": "우선주 종목코드 제외", "잔존": None, "제외": len(funnel.get("excluded_preferred_by_code", []))},
+        {"단계": "수동 제외목록", "잔존": None, "제외": len(funnel.get("excluded_manual", []))},
+        {"단계": "ETF/ETN 등 비상장법인 제외", "잔존": None, "제외": len(funnel["excluded_not_a_company"])},
+        {"단계": "상장 60일 미만 제외", "잔존": None, "제외": len(funnel["excluded_too_new"])},
+        {"단계": "최종 유니버스", "잔존": funnel["final_universe_size"]},
+        {"단계": "정배열+눌림 감지", "잔존": len(all_candidates)},
+    ]
+    funnel_rows += [{"단계": k, "잔존": v} for k, v in stage_funnel.items()]
+    funnel_rows.append({"단계": "최종 후보", "잔존": len(final)})
+    funnel_csv = OUT_DIR / f"kr_pullback_funnel_{date_str}.csv"
+    pd.DataFrame(funnel_rows).to_csv(funnel_csv, index=False, encoding="utf-8-sig")
+
     html_path = OUT_DIR / f"kr_pullback_{date_str}.html"
-    html_path.write_text(build_html_report(final, histories, run_date.strftime("%Y-%m-%d"), funnel, len(all_candidates)), encoding="utf-8")
+    html_path.write_text(build_html_report(final, histories, run_date.strftime("%Y-%m-%d"),
+                                           funnel, len(all_candidates), stage_funnel), encoding="utf-8")
 
     print("[5/5] 최근 거래일 분포 검증 중 (캐시된 데이터로 추가 네트워크 호출 없이 재계산)...")
     VALIDATION_DAYS = 120

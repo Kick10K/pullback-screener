@@ -26,18 +26,27 @@ LIMIT_BYTES = 262_144
 # l_leg/l_pull, passes_*, value_growth_pct, vol_dryup_ratio)는 차트 bars 나 structure 에
 # 이미 들어 있거나 화면에서 쓰지 않으므로 DB 문서에서 뺀다.
 ROW_FIELDS = (
-    "code", "name", "market", "sector", "industry", "date",
+    "code", "name", "market", "sector", "date",   # industry 는 툴팁 전용이라 DB에서 제외
     "close", "mcap_eok", "is_uptrend", "is_candidate", "exclude_reason",
     "retrace_ratio", "retrace_ratio_legacy", "disparity_vs_ma20",
     "days_since_high20", "avg_trading_value20_eok", "score", "peak_date",
     "dd_from_high", "depth_pct", "range_pct", "bounce_from_low", "structure",
-)
+    "value_surge", "vol_dryup_ratio", "long_return_pct", "ma60_slope_pct",
+)   # score_parts(6개 세부점수)는 화면에서 아직 쓰지 않고 용량이 커서 DB에서는 뺀다.
+    # SEED(페이지 내장)와 CSV 에는 그대로 남아 있다.
 
 
 def main() -> None:
     payload = json.loads(SRC.read_text())["payload"]
     slim = {k: v for k, v in payload.items() if k != "results"}
     slim["results"] = [{k: r[k] for k in ROW_FIELDS if k in r} for r in payload["results"]]
+    # structure 가 전체의 25%를 차지한다. base_date/base_close 는 행의 date/close 와
+    # 같은 값이라 페이지가 행에서 채운다(④ = 기준일 종가). 중복을 DB에 두 번 싣지 않는다.
+    for r in slim["results"]:
+        st = r.get("structure")
+        if isinstance(st, dict):
+            r["structure"] = {k: v for k, v in st.items()
+                              if k not in ("base_date", "base_close")}
 
     body = json.dumps({"payload": slim}, ensure_ascii=False)
     size = len(body.encode())

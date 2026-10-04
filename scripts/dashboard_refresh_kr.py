@@ -54,7 +54,12 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
     )
     # INV-7: 시계열 구조 조건. screen_on_date()와 같은 함수를 호출해 판정이 갈라지지 않게 한다.
     struct = krs.structure_verdict(row)
-    is_candidate = bool(is_uptrend and liquidity_ok and band_ok and days_ok and struct["ok"])
+    # §3-3 고점 대비 낙폭 상한 + §5 관리종목 휴리스틱. screen_on_date()와 같은 기준이어야 한다.
+    dd = row["dd_from_high"]
+    dd_ok = (not pd.isna(dd)) and dd <= krs.CONFIG["DD_FROM_HIGH_MAX"]
+    flagged = bool(row.get("halted", False)) or bool(row.get("extreme_move", False))
+    is_candidate = bool(is_uptrend and liquidity_ok and band_ok and days_ok
+                        and dd_ok and struct["ok"] and not flagged)
 
     reasons = []
     if not is_uptrend:
@@ -65,6 +70,11 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
         reasons.append(f"고점경과일 {dsh_int}일 (허용 {krs.CONFIG['DAYS_SINCE_HIGH_MIN']}~{krs.CONFIG['DAYS_SINCE_HIGH_MAX']}일)")
     if not band_ok:
         reasons.append("되돌림비율 범위 밖")
+    if not dd_ok:
+        shown = "N/A" if pd.isna(dd) else f"{dd * 100:.1f}%"
+        reasons.append(f"고점 대비 낙폭 {shown} (상한 {krs.CONFIG['DD_FROM_HIGH_MAX'] * 100:.0f}%)")
+    if flagged:
+        reasons.append("거래정지/이상급등 의심")
     reasons.extend(struct["reasons"])
 
     # 경과일 필터에 걸린 종목은 점수 계산에 도달하지 않는다(§4).
@@ -108,14 +118,23 @@ def row_for_dashboard(feat: pd.DataFrame, meta: dict, date: pd.Timestamp) -> dic
         days_since_high20=None if pd.isna(row["days_since_high20"]) else int(row["days_since_high20"]),
         avg_trading_value20_eok=nn(round(float(avg_val20), 1)) if not pd.isna(avg_val20) else None,
         score=sc["score"] if sc else None,
-        value_growth_pct=sc["value_growth_pct"] if sc else None,
+        value_surge=sc["value_surge"] if sc else None,
         vol_dryup_ratio=sc["vol_dryup_ratio"] if sc else None,
+        long_return_pct=sc["long_return_pct"] if sc else None,
+        ma60_slope_pct=sc["ma60_slope_pct"] if sc else None,
+        score_parts={k: v for k, v in sc.items() if k.startswith("s_")} if sc else None,
+        passes_dd_from_high=bool(dd_ok),
         peak_date=peak_date,
     )
 
 
-def build_bars(feat: pd.DataFrame) -> list[dict]:
-    tail = feat.tail(CHART_BARS).reset_index()
+def build_bars(feat: pd.DataFrame, raw: pd.DataFrame) -> list[dict]:
+    """차트용 봉 데이터. OHLC 는 원본(raw)에서, 지표는 feat 에서 가져온다.
+
+    feat 에는 high/low 가 없다 — INV-1을 구조로 강제하려고 compute_features() 가
+    떨어뜨린다. 표시 계층만 원본을 본다.
+    """
+    tail = feat.tail(CHART_BARS).join(raw[["high", "low"]], how="left").reset_index()
 
     def r(v, d=2):
         return None if pd.isna(v) else round(float(v), d)
@@ -144,6 +163,7 @@ def main():
     print("[2/3] 상태 플래그 + 3년치 캐시 갱신...")
     metas: dict[str, dict] = {}
     histories: dict[str, pd.DataFrame] = {}
+    raws: dict[str, pd.DataFrame] = {}
     status_excluded, failed, discontinuity_excluded = [], [], []
     for i, (_, urow) in enumerate(universe.iterrows(), 1):
         code = urow["code"]
@@ -161,6 +181,7 @@ def main():
                 discontinuity_excluded.append((urow["name"], code, gaps[:3]))
                 continue
             histories[code] = krs.compute_features(hist)
+            raws[code] = hist                      # 캔들 차트용 원본 OHLC (INV-1)
             metas[code] = urow.to_dict()
         except Exception:
             failed.append(urow["name"])
@@ -185,7 +206,7 @@ def main():
         if r is None:
             continue
         results.append(r)
-        bars = build_bars(feat)
+        bars = build_bars(feat, raws[code])
         (BARS_DIR / f"{code}.json").write_text(
             json.dumps({"code": code, "as_of": run_date.strftime("%Y-%m-%d"), "bars": bars}, ensure_ascii=False)
         )
